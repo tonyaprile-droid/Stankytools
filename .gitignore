@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Database
+*.sqlite3
+*.db
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Windows
+Thumbs.db
+Desktop.ini
