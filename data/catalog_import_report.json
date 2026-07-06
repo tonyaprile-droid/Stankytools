@@ -1,0 +1,51 @@
+{
+  "stats": {
+    "pages": 27,
+    "links": 219,
+    "items": 174,
+    "images": 174,
+    "skipped": 0,
+    "duplicates": 45,
+    "errors": 0
+  },
+  "requested_pages": [
+    [
+      "/items/augment",
+      "Augmentations"
+    ],
+    [
+      "/items/garment?tier=6",
+      "Garments"
+    ],
+    [
+      "/items/utility",
+      "Utility"
+    ],
+    [
+      "/items/vehicles",
+      "Vehicles"
+    ],
+    [
+      "/items/weapons?tier=6",
+      "Weapons"
+    ],
+    [
+      "/items/misc/components",
+      "Components"
+    ],
+    [
+      "/items/misc/fuel",
+      "Fuel"
+    ],
+    [
+      "/items/misc/rawresources",
+      "Raw Resources"
+    ],
+    [
+      "/items/misc/refinedresources",
+      "Refined Resources"
+    ]
+  ],
+  "unique_links_found": 219,
+  "failures": []
+}

@@ -1,0 +1,11 @@
+{
+  "source_url": "https://dune.gaming.tools/deep-desert",
+  "last_checked": "Bundled expected full grid map",
+  "last_changed": "Bundled expected full grid map",
+  "content_hash": "bundled",
+  "image_url": "",
+  "image_path": "data/deep_desert/deep_desert_map.png",
+  "changed": false,
+  "skipped": true,
+  "update_rule": "Tuesday 7:15 AM Eastern; bundled fallback map included"
+}
