@@ -33,8 +33,18 @@ PAGE_LOAD_DELAY_SECONDS = 5
 
 
 def _eastern_now() -> datetime:
+    """Return current Eastern time, safely on Windows/PyInstaller builds.
+
+    Some frozen Windows builds do not include the IANA timezone database
+    unless the optional `tzdata` package is bundled. If it is missing,
+    ZoneInfo("America/New_York") raises ZoneInfoNotFoundError.
+    The app should still launch, so fall back to local time.
+    """
     if ZoneInfo is not None:
-        return datetime.now(ZoneInfo(EASTERN_TZ)).replace(microsecond=0)
+        try:
+            return datetime.now(ZoneInfo(EASTERN_TZ)).replace(microsecond=0)
+        except Exception:
+            pass
     return datetime.now().replace(microsecond=0)
 
 
