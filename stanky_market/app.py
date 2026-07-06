@@ -13,7 +13,7 @@ import string
 import base64
 import time
 
-from PySide6.QtCore import Qt, QSize, QTimer, QPointF, QThread, Signal
+from PySide6.QtCore import Qt, QSize, QTimer, QPointF, QThread, Signal, QUrl, QLoggingCategory, qInstallMessageHandler
 from PySide6.QtGui import QPixmap, QIcon, QPainter, QColor, QBrush, QPen, QFont, QWheelEvent, QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -47,14 +47,52 @@ from PySide6.QtWidgets import (
     QMenu,
     QFileDialog,
     QProgressBar,
+    QToolButton,
 )
 
 from . import db, deep_desert, guild_config, updater
+from .paths import app_root, asset_dir, data_dir
+
+try:
+    from PySide6.QtWebEngineWidgets import QWebEngineView
+    from PySide6.QtWebEngineCore import QWebEnginePage
+    WEBENGINE_AVAILABLE = True
+except Exception:
+    QWebEngineView = None
+    QWebEnginePage = None
+    WEBENGINE_AVAILABLE = False
+
+
+
+def _qt_message_filter(mode, context, message):
+    """Hide harmless Qt/WebEngine warnings that look like app errors in PowerShell."""
+    text = str(message or "")
+    noisy_tokens = (
+        "QFont::setPointSize",
+        "handshake failed",
+        "ssl_client_socket_impl",
+        "net_error -100",
+        "googletag",
+        "Audigent",
+        "__gpp",
+        "Invalid GPT fixed size",
+    )
+    if any(token.lower() in text.lower() for token in noisy_tokens):
+        return
+    try:
+        sys.stderr.write(text + "\n")
+    except Exception:
+        pass
+
+try:
+    qInstallMessageHandler(_qt_message_filter)
+except Exception:
+    pass
 
 APP_TITLE = "StankyTools"
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-ASSETS_DIR = PROJECT_ROOT / "assets"
+PROJECT_ROOT = app_root()
+ASSETS_DIR = asset_dir()
 
 def asset_path(*parts: str) -> Path:
     return ASSETS_DIR.joinpath(*parts)
@@ -88,6 +126,7 @@ def resolve_local_path(value: str) -> Path:
 
 
 CATALOG_PIXMAP_CACHE: dict[tuple[str, int], QPixmap] = {}
+METHOD_DEEP_DESERT_URL = "https://www.method.gg/dune-awakening/deep-desert-companion"
 
 def catalog_image_pixmap(image_path: str, size: int = 64) -> QPixmap:
     """Return a square thumbnail pixmap for catalog rows, with a fallback placeholder.
@@ -146,26 +185,27 @@ QLabel#BrandSub {{
     font-size: 11px;
     letter-spacing: 3px;
 }}
-QPushButton#NavButton {{
-    text-align: left;
-    padding: 18px 20px;
+QToolButton#NavButton {{
+    padding: 10px 8px 12px 8px;
     border: 1px solid transparent;
-    border-radius: 16px;
+    border-radius: 18px;
     background: #59080706;
-    color: #e8d4a2;
-    font-size: 17px;
-    font-weight: 800;
+    color: #fff0bf;
+    font-size: 18px;
+    font-weight: 900;
+    letter-spacing: 2px;
 }}
-QPushButton#NavButton:hover {{
+QToolButton#NavButton:hover {{
     background: #23D4AE63;
     border: 1px solid #72D4AE63;
 }}
-QPushButton#NavButton[active="true"] {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-        stop:0 #6BD4AE63, stop:1 #387452D8);
+QToolButton#NavButton[active="true"] {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #38D4AE63, stop:1 #227452D8);
     border: 1px solid #d4ae63;
     color: #fff2c9;
 }}
+QToolButton#NavButton::menu-indicator {{ image: none; }}
 QFrame#Hero {{
     background-color: #1b1209;
     border: 1px solid #8CF4CD7A;
@@ -409,6 +449,103 @@ class CatalogImportWorker(QThread):
             self.finished_ok.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+
+
+class QuietWebEnginePage(QWebEnginePage if QWebEnginePage is not None else object):
+    """Suppress noisy third-party ad console warnings from embedded Method.gg.
+
+    The map still loads normally; this only hides JavaScript console chatter like
+    Google Publisher Tag deprecation warnings that make the terminal look broken.
+    """
+    def javaScriptConsoleMessage(self, level, message, line_number, source_id):  # noqa: N802
+        text = str(message or "")
+        noisy_tokens = (
+            "googletag",
+            "GPT",
+            "Audigent",
+            "__gpp",
+            "Invalid GPT fixed size",
+            "encryptedSignalProviders",
+            "PubAdsService.setTargeting",
+            "Slot.getTargeting",
+            "handshake failed",
+            "ssl_client_socket_impl",
+            "net_error -100",
+        )
+        if any(token.lower() in text.lower() for token in noisy_tokens):
+            return
+        try:
+            super().javaScriptConsoleMessage(level, message, line_number, source_id)
+        except Exception:
+            return
+
+
+class LiveDeepDesertView(QWidget):
+    """Embedded live Deep Desert companion map. Uses the Method.gg page directly so its filters remain intact."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        toolbar = QHBoxLayout()
+        label = QLabel("Live Deep Desert Map")
+        label.setObjectName("SectionTitle")
+        refresh = QPushButton("Refresh Live Map")
+        open_browser = QPushButton("Open in Browser")
+        refresh.clicked.connect(self.reload)
+        open_browser.clicked.connect(lambda: webbrowser.open(METHOD_DEEP_DESERT_URL))
+        toolbar.addWidget(label)
+        toolbar.addStretch()
+        toolbar.addWidget(refresh)
+        toolbar.addWidget(open_browser)
+        layout.addLayout(toolbar)
+
+        filters_panel = QFrame()
+        filters_panel.setObjectName("Panel")
+        filters_layout = QHBoxLayout(filters_panel)
+        filters_layout.setContentsMargins(12, 8, 12, 8)
+        filters_layout.setSpacing(10)
+        filters_label = QLabel("Saved Filters:")
+        filters_label.setStyleSheet("color:#d4ae63; font-weight:700;")
+        filters_layout.addWidget(filters_label)
+        self.filter_checks = []
+        for name in ["Resources", "POIs", "Bases", "Caves", "Wrecks", "Merchants", "Enemy", "Friendly"]:
+            cb = QCheckBox(name)
+            cb.setChecked(db.get_setting("deep_filter_" + name.lower(), "1") == "1")
+            cb.toggled.connect(lambda checked, n=name: db.set_setting("deep_filter_" + n.lower(), "1" if checked else "0"))
+            self.filter_checks.append(cb)
+            filters_layout.addWidget(cb)
+        filters_layout.addStretch()
+        layout.addWidget(filters_panel)
+
+        if WEBENGINE_AVAILABLE and QWebEngineView is not None:
+            self.web = QWebEngineView(self)
+            if QWebEnginePage is not None:
+                self.web.setPage(QuietWebEnginePage(self.web))
+            self.web.setUrl(QUrl(METHOD_DEEP_DESERT_URL))
+            layout.addWidget(self.web, 1)
+        else:
+            self.web = None
+            fallback = QFrame()
+            fallback.setObjectName("Panel")
+            box = QVBoxLayout(fallback)
+            msg = QLabel("The embedded browser component is not available in this build.\nUse Open in Browser, or install/build with PySide6 QtWebEngine support.")
+            msg.setWordWrap(True)
+            msg.setAlignment(Qt.AlignCenter)
+            box.addStretch()
+            box.addWidget(msg)
+            box.addWidget(open_browser, alignment=Qt.AlignCenter)
+            box.addStretch()
+            layout.addWidget(fallback, 1)
+
+    def reload(self):
+        if self.web is not None:
+            self.web.setUrl(QUrl(METHOD_DEEP_DESERT_URL))
+        else:
+            webbrowser.open(METHOD_DEEP_DESERT_URL)
+
 
 class GuildJoinDialog(QDialog):
     def __init__(self, parent: QWidget | None = None):
@@ -831,7 +968,7 @@ def role_can_manage_guild() -> bool:
 
 
 def guild_logo_cache_path() -> Path:
-    return PROJECT_ROOT / "data" / "guild_logo.png"
+    return data_dir() / "guild_logo.png"
 
 
 class HeroFrame(QFrame):
@@ -898,9 +1035,9 @@ class MainWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("SideBar")
-        sidebar.setFixedWidth(330)
+        sidebar.setFixedWidth(285)
         side_layout = QVBoxLayout(sidebar)
-        side_layout.setContentsMargins(22, 28, 22, 22)
+        side_layout.setContentsMargins(16, 28, 16, 22)
         brand = QLabel("STANKY\nTOOLS")
         brand.setObjectName("Brand")
         brand.setAlignment(Qt.AlignCenter)
@@ -922,12 +1059,18 @@ class MainWindow(QMainWindow):
         ]
         self.guild_page_index = 4
         for idx, (label, icon_name, builder) in enumerate(page_specs):
-            btn = QPushButton("  " + label)
-            icon_path = asset_path("icons", icon_name)
+            btn = QToolButton()
+            btn.setText(label.upper())
+            menu_icon = icon_name.replace("_small", "_menu")
+            icon_path = asset_path("icons", menu_icon)
+            if not icon_path.exists():
+                icon_path = asset_path("icons", icon_name)
             if icon_path.exists():
                 btn.setIcon(QIcon(str(icon_path)))
-                btn.setIconSize(QSize(88, 88))
-            btn.setMinimumHeight(118)
+                btn.setIconSize(QSize(172, 122))
+            btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            btn.setMinimumHeight(178)
+            btn.setMaximumHeight(196)
             btn.setObjectName("NavButton")
             btn.setProperty("active", idx == 0)
             if label == "Guild":
@@ -1020,20 +1163,22 @@ class MainWindow(QMainWindow):
 
         command_row = QHBoxLayout()
         self.dashboard_links_table = StankyTable(["Title", "URL", "Poster"])
-        self.news_table = StankyTable(["Date", "Poster", "Guild News"])
+        self.news_table = StankyTable(["Latest News", "Poster", "Date"])
         self.dashboard_links_table.setWordWrap(True)
         self.news_table.setWordWrap(True)
         self.dashboard_links_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.dashboard_links_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.dashboard_links_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.dashboard_links_table.cellDoubleClicked.connect(self.open_selected_dashboard_link)
-        self.news_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.news_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.news_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.news_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.news_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.news_table.cellDoubleClicked.connect(self.show_dashboard_news_detail)
 
         links_panel = self._panel("Useful Links", self.dashboard_links_table)
         news_panel = self._panel("Guild News", self.news_table)
+        news_panel.setMinimumWidth(620)
+        self.news_table.setMinimumWidth(600)
 
         guild_card = QFrame()
         guild_card.setObjectName("Panel")
@@ -1075,8 +1220,8 @@ class MainWindow(QMainWindow):
         guild_layout.addSpacing(10)
         guild_layout.addLayout(quick)
 
-        command_row.addWidget(links_panel, 2)
-        command_row.addWidget(news_panel, 2)
+        command_row.addWidget(links_panel, 1)
+        command_row.addWidget(news_panel, 3)
         command_row.addWidget(guild_card, 1)
         layout.addLayout(command_row, 1)
         return page
@@ -1262,8 +1407,12 @@ class MainWindow(QMainWindow):
     def _build_deep_desert_page(self) -> QWidget:
         page, layout = self._page_shell("Deep Desert", "Built-in tactical map and guild POIs.")
         body = QHBoxLayout()
+        self.map_tabs = QTabWidget()
+        self.live_deep_desert = LiveDeepDesertView()
         self.map_view = DeepDesertMapView()
         self.map_view.add_poi_callback = self.add_poi_at
+        self.map_tabs.addTab(self.live_deep_desert, "Live Map + Filters")
+        self.map_tabs.addTab(self.map_view, "Guild POI Overlay")
         poi_panel = QFrame()
         poi_panel.setObjectName("Panel")
         poi_layout = QVBoxLayout(poi_panel)
@@ -1297,7 +1446,7 @@ class MainWindow(QMainWindow):
         poi_layout.addWidget(self.poi_sync_status)
         poi_layout.addLayout(btns)
         poi_layout.addWidget(self.poi_table, 2)
-        body.addWidget(self.map_view, 3)
+        body.addWidget(self.map_tabs, 3)
         body.addWidget(poi_panel, 1)
         layout.addLayout(body, 1)
         return page
@@ -1383,15 +1532,17 @@ class MainWindow(QMainWindow):
 
         right_panel = QFrame()
         right_panel.setObjectName("Panel")
+        right_panel.setMinimumWidth(760)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(16, 16, 16, 16)
         news_title = QLabel("Guild News")
         news_title.setObjectName("SectionTitle")
         right_layout.addWidget(news_title)
-        self.guild_page_news = StankyTable(["Date", "Poster", "Update"])
-        self.guild_page_news.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.guild_page_news = StankyTable(["Latest News", "Poster", "Date"])
+        self.guild_page_news.setMinimumWidth(730)
+        self.guild_page_news.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.guild_page_news.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.guild_page_news.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.guild_page_news.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.guild_page_news.cellDoubleClicked.connect(self.show_guild_news_detail)
         right_layout.addWidget(self.guild_page_news, 1)
         news_buttons = QHBoxLayout()
@@ -1437,7 +1588,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.guild_page_activity, 1)
 
         body.addWidget(members_panel, 1)
-        body.addWidget(right_panel, 2)
+        body.addWidget(right_panel, 3)
         layout.addLayout(body, 1)
         QTimer.singleShot(250, self.refresh_guild_page)
         return page
@@ -1651,7 +1802,7 @@ class MainWindow(QMainWindow):
         if guild:
             self.sync_guild_dashboard_content(show_errors=False)
         if hasattr(self, "dashboard_guild_name"):
-            self.dashboard_guild_name.setText(db.get_setting("guild_name", "Guild") or "Guild")
+            self.dashboard_guild_name.setText((db.get_setting("guild_name", "Guild") or "Guild") if guild else "Not in a Guild")
         if hasattr(self, "dashboard_user"):
             self.dashboard_user.setText("Profile: " + (db.get_setting("display_name", "Not joined") or "Not joined"))
         if hasattr(self, "dashboard_members"):
@@ -1858,7 +2009,7 @@ class MainWindow(QMainWindow):
         self.refresh_hagga_map()
         if not hasattr(self, "map_view"):
             return
-        static_map = PROJECT_ROOT / "data" / "deep_desert_map.png"
+        static_map = data_dir() / "deep_desert_map.png"
         if static_map.exists():
             self.map_view.set_map(str(static_map))
             self.refresh_pois()
@@ -1869,7 +2020,7 @@ class MainWindow(QMainWindow):
         image_path = meta.get("image_path", "")
         image_file = Path(image_path)
         if image_path and not image_file.is_absolute():
-            image_file = PROJECT_ROOT / image_file
+            image_file = data_dir().parent / image_file
         if image_path and image_file.exists():
             self.map_view.set_map(str(image_file))
             self.refresh_pois()
@@ -2089,9 +2240,9 @@ class MainWindow(QMainWindow):
                 if row["body"]:
                     title_body += " — " + str(row["body"]).replace("\n", " ")
                 self.news_table.add_row([
-                    format_app_date(row["created_at"]),
-                    row["created_by"] or "—",
                     title_body,
+                    row["created_by"] or "—",
+                    format_app_date(row["created_at"]),
                 ])
             self.news_table.setSortingEnabled(True)
             self.news_table.resizeRowsToContents()
@@ -2113,7 +2264,7 @@ class MainWindow(QMainWindow):
                 text = (row["title"] or "Guild Update")
                 if row["body"]:
                     text += " — " + str(row["body"]).replace("\n", " ")
-                self.guild_page_news.add_row([format_app_date(row["created_at"]), row["created_by"] or "—", text])
+                self.guild_page_news.add_row([text, row["created_by"] or "—", format_app_date(row["created_at"])])
             self.guild_page_news.setSortingEnabled(True)
         if hasattr(self, "guild_page_links"):
             self.guild_page_links.setSortingEnabled(False)
@@ -2167,6 +2318,11 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         url, key = active_supabase()
+        if not url or not key or "PASTE_" in key:
+            db.add_local_guild_news(guild, title.strip(), body.strip(), db.get_setting("display_name", ""))
+            self.refresh_guild_page()
+            self.refresh_dashboard()
+            return
         try:
             payload = [{
                 "guild_code": guild,
@@ -2221,8 +2377,14 @@ class MainWindow(QMainWindow):
             return
         if QMessageBox.question(self, "Delete Guild News", "Delete this guild news update?") != QMessageBox.Yes:
             return
+        url, key = active_supabase()
+        if rid.startswith("local-") or not url or not key or "PASTE_" in key:
+            db.delete_local_guild_news(rid)
+            self.refresh_guild_page()
+            self.refresh_dashboard()
+            return
         try:
-            supabase_request("DELETE", *active_supabase(), f"guild_news?id=eq.{urllib.parse.quote(rid)}")
+            supabase_request("DELETE", url, key, f"guild_news?id=eq.{urllib.parse.quote(rid)}")
             self.log_guild_activity("deleted a guild news update")
             self.sync_guild_dashboard_content(show_errors=False)
             self.refresh_guild_page()
@@ -2623,7 +2785,7 @@ class MainWindow(QMainWindow):
     def refresh_hagga_map(self):
         if not hasattr(self, "hagga_map_view"):
             return
-        image_path = Path(__file__).resolve().parents[1] / "data" / "hagga_basin_map.png"
+        image_path = data_dir() / "hagga_basin_map.png"
         if image_path.exists():
             self.hagga_map_view.set_map(str(image_path))
             self.refresh_bases()
@@ -2810,6 +2972,13 @@ class MainWindow(QMainWindow):
         return role_can_manage_guild()
 
     def refresh_guild_logo_widgets(self):
+        guild = db.get_setting("guild_code", "").strip().upper()
+        if not guild:
+            for label in [getattr(self, "dashboard_guild_logo", None), getattr(self, "settings_guild_logo", None)]:
+                if label is not None:
+                    label.setPixmap(QPixmap())
+                    label.setText("NO GUILD")
+            return
         path = guild_logo_cache_path()
         fallback = asset_path("images", "default_guild_logo.png")
         pix = QPixmap(str(path)) if path.exists() else QPixmap(str(fallback)) if fallback.exists() else QPixmap()
@@ -2959,9 +3128,18 @@ class MainWindow(QMainWindow):
     def refresh_guild_members(self):
         url, key = active_supabase()
         guild = db.get_setting("guild_code", "").upper()
-        if not url or not key or not guild:
+        if not guild:
             self.current_guild_members = []
             return []
+        if not url or not key or "PASTE_" in key:
+            rows = [{"display_name": r["display_name"], "role": r["role"]} for r in db.list_local_members(guild)]
+            current_name = db.get_setting("display_name", "")
+            if current_name and not any((r.get("display_name", "") or "").strip().lower() == current_name.strip().lower() for r in rows):
+                role = db.get_setting("guild_role", "member") or "member"
+                db.upsert_local_member(guild, current_name, role)
+                rows.append({"display_name": current_name, "role": role})
+            self.current_guild_members = rows
+            return rows
         try:
             rows = supabase_request("GET", url, key, f"guild_members?guild_code=eq.{urllib.parse.quote(guild)}&select=display_name,role&order=display_name.asc")
             if not isinstance(rows, list):
@@ -3001,6 +3179,11 @@ class MainWindow(QMainWindow):
             return False
         url, key = active_supabase()
         guild = db.get_setting("guild_code", "").upper()
+        if not url or not key or "PASTE_" in key:
+            db.remove_local_member(guild, member_name)
+            self.refresh_guild_members()
+            self.refresh_dashboard()
+            return True
         try:
             endpoint = f"guild_members?guild_code=eq.{urllib.parse.quote(guild)}&display_name=eq.{urllib.parse.quote(member_name)}"
             supabase_request("DELETE", url, key, endpoint)
@@ -3301,8 +3484,22 @@ class MainWindow(QMainWindow):
         if not guild_code:
             QMessageBox.information(self, "Create Guild", "Guild code is required.")
             return
-        if not url or not key:
-            QMessageBox.warning(self, "Create Guild Failed", "Connection is not configured for this build.")
+        if not url or not key or "PASTE_" in key:
+            old_guild = db.get_setting("guild_code", "").upper()
+            if old_guild and old_guild != guild_code.upper():
+                db.clear_local_guild_cache(old_guild)
+            db.set_setting("guild_code", guild_code)
+            db.set_setting("guild_name", guild_name)
+            db.set_setting("guild_role", "owner")
+            db.upsert_local_member(guild_code, display_name, "owner")
+            if hasattr(self, "guild_code"):
+                self.guild_code.setText(guild_code)
+            if hasattr(self, "guild_role_label"):
+                self.guild_role_label.setText("Role: owner")
+            self.update_guild_button_visibility()
+            self.refresh_guild_members()
+            self.refresh_dashboard()
+            QMessageBox.information(self, "Guild Created", f"Local guild created. Share this code with members if you later connect Supabase:\n\n{guild_code}")
             return
         try:
             existing_name = supabase_request(
@@ -3367,6 +3564,29 @@ class MainWindow(QMainWindow):
         if not guild or not display_name:
             QMessageBox.information(self, "Guild", "Enter display name and guild code first.")
             return
+        if not url or not key or "PASTE_" in key:
+            if old_guild and old_guild != guild:
+                db.clear_local_guild_cache(old_guild)
+            db.set_setting("display_name", display_name)
+            db.set_setting("guild_code", guild)
+            db.set_setting("guild_name", db.get_setting("guild_name", guild) or guild)
+            db.set_setting("guild_role", db.get_setting("guild_role", "member") or "member")
+            db.upsert_local_member(guild, display_name, db.get_setting("guild_role", "member") or "member")
+            if hasattr(self, "guild_code"):
+                self.guild_code.setText(guild)
+            if hasattr(self, "display_name"):
+                self.display_name.setText(display_name)
+            if hasattr(self, "guild_role_label"):
+                self.guild_role_label.setText("Role: " + (db.get_setting("guild_role", "member") or "member"))
+            self.update_guild_button_visibility()
+            self.refresh_guild_members()
+            self.refresh_pois()
+            self.refresh_bases()
+            self.refresh_guild_page()
+            self.refresh_dashboard()
+            if show_success:
+                QMessageBox.information(self, "Guild", f"Joined local guild {guild}.")
+            return
         try:
             found = supabase_request("GET", url, key, f"guilds?guild_code=eq.{urllib.parse.quote(guild)}&select=*")
             if not found:
@@ -3414,7 +3634,18 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
+    # Quiet noisy Qt WebEngine/ad-script logging before the embedded map starts.
+    try:
+        QLoggingCategory.setFilterRules("qt.webenginecontext.debug=false\njs.warning=false\njs.info=false")
+    except Exception:
+        pass
     app = QApplication(sys.argv)
+    try:
+        font = QFont("Segoe UI")
+        font.setPointSize(10)
+        app.setFont(font)
+    except Exception:
+        pass
     app.setStyleSheet(DUNE_QSS)
     win = MainWindow()
     win.show()

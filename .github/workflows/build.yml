@@ -36,9 +36,13 @@ jobs:
         run: |
           pyinstaller --clean --noconfirm --windowed `
             --name StankyTools `
+            --hidden-import PySide6.QtWebEngineWidgets `
+            --hidden-import PySide6.QtWebEngineCore `
+            --collect-submodules PySide6.QtCore `
+            --collect-submodules PySide6.QtGui `
+            --collect-submodules PySide6.QtWidgets `
             --add-data "assets;assets" `
-            --add-data "data\hagga_basin_map.png;data" `
-            --add-data "data\deep_desert_map.png;data" `
+            --add-data "data;data" `
             main.py
 
       - name: Package portable ZIP

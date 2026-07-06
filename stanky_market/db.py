@@ -967,3 +967,91 @@ def list_guild_links(guild_code: str = "", limit: int = 30) -> list[sqlite3.Row]
         ).fetchall()
     finally:
         conn.close()
+
+# ---- Local/offline guild support used when Supabase is not configured ----
+def ensure_local_guild_tables() -> None:
+    conn = connect()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS local_guild_members (
+                guild_code TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'member',
+                joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_code, display_name)
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def upsert_local_member(guild_code: str, display_name: str, role: str = "member") -> None:
+    ensure_local_guild_tables()
+    conn = connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO local_guild_members(guild_code, display_name, role)
+            VALUES(?, ?, ?)
+            ON CONFLICT(guild_code, display_name) DO UPDATE SET role=excluded.role
+            """,
+            ((guild_code or "").strip().upper(), (display_name or "").strip(), (role or "member").strip().lower()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_local_members(guild_code: str = "") -> list[sqlite3.Row]:
+    ensure_local_guild_tables()
+    conn = connect()
+    try:
+        guild = (guild_code or "").strip().upper()
+        return conn.execute(
+            "SELECT display_name, role, joined_at FROM local_guild_members WHERE guild_code=? ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'officer' THEN 1 ELSE 2 END, display_name COLLATE NOCASE",
+            (guild,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def remove_local_member(guild_code: str, display_name: str) -> None:
+    ensure_local_guild_tables()
+    conn = connect()
+    try:
+        conn.execute(
+            "DELETE FROM local_guild_members WHERE guild_code=? AND display_name=?",
+            ((guild_code or "").strip().upper(), (display_name or "").strip()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def add_local_guild_news(guild_code: str, title: str, body: str, created_by: str) -> str:
+    import uuid
+    rid = "local-" + uuid.uuid4().hex
+    conn = connect()
+    try:
+        guild = (guild_code or "").strip().upper()
+        conn.execute(
+            """
+            INSERT INTO guild_news_cache(remote_id, guild_code, title, body, created_by, created_at)
+            VALUES(?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (rid, guild, (title or "").strip(), (body or "").strip(), (created_by or "").strip()),
+        )
+        conn.commit()
+        return rid
+    finally:
+        conn.close()
+
+
+def delete_local_guild_news(remote_id: str) -> None:
+    conn = connect()
+    try:
+        conn.execute("DELETE FROM guild_news_cache WHERE remote_id=?", ((remote_id or "").strip(),))
+        conn.commit()
+    finally:
+        conn.close()

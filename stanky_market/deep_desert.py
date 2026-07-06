@@ -14,13 +14,17 @@ try:
 except Exception:  # pragma: no cover
     ZoneInfo = None
 
+try:
+    from .paths import data_dir
+except Exception:
+    data_dir = None
 APP_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = APP_DIR / "data"
+DATA_DIR = data_dir() if data_dir is not None else APP_DIR / "data"
 MAP_DIR = DATA_DIR / "deep_desert"
 META_PATH = MAP_DIR / "deep_desert_meta.json"
 HTML_PATH = MAP_DIR / "deep_desert.html"
-MAP_URL = "https://dune.gaming.tools/deep-desert"
-USER_AGENT = "StankyToolsDeepDesertUpdater/1.1 (+weekly-cache)"
+MAP_URL = "https://www.method.gg/dune-awakening/deep-desert-companion"
+USER_AGENT = "StankyToolsDeepDesertLiveLink/2.0 (+weekly-cache)"
 EASTERN_TZ = "America/New_York"
 WEEKLY_UPDATE_WEEKDAY = 1  # Tuesday, Monday=0
 WEEKLY_UPDATE_HOUR = 7
