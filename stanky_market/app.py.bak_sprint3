@@ -11,7 +11,6 @@ import urllib.parse
 import random
 import string
 import base64
-import time
 
 from PySide6.QtCore import Qt, QSize, QTimer, QPointF, QThread, Signal
 from PySide6.QtGui import QPixmap, QIcon, QPainter, QColor, QBrush, QPen, QFont, QWheelEvent, QAction
@@ -29,11 +28,9 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QProgressDialog,
     QScrollArea,
     QSpinBox,
     QStackedWidget,
-    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -63,19 +60,6 @@ def qss_path(path: Path) -> str:
     return path.resolve().as_posix()
 
 
-def format_app_date(value: str) -> str:
-    """Format timestamps like 2026-07-06T12:34:56 as 7-6-2026."""
-    raw = str(value or "").strip()
-    if not raw:
-        return "—"
-    date_part = raw.split("T", 1)[0].split(" ", 1)[0]
-    try:
-        year, month, day = date_part.split("-")[:3]
-        return f"{int(month)}-{int(day)}-{int(year)}"
-    except Exception:
-        return raw[:10] or "—"
-
-
 def resolve_local_path(value: str) -> Path:
     """Resolve a path saved by StankyTools, handling absolute and project-relative values."""
     raw = (value or "").strip()
@@ -87,19 +71,8 @@ def resolve_local_path(value: str) -> Path:
     return PROJECT_ROOT / p
 
 
-CATALOG_PIXMAP_CACHE: dict[tuple[str, int], QPixmap] = {}
-
 def catalog_image_pixmap(image_path: str, size: int = 64) -> QPixmap:
-    """Return a square thumbnail pixmap for catalog rows, with a fallback placeholder.
-
-    Thumbnails are cached because repeatedly decoding hundreds of images was a
-    major source of UI lag when switching tabs or searching the catalog.
-    """
-    cache_key = (str(image_path or ""), int(size))
-    cached = CATALOG_PIXMAP_CACHE.get(cache_key)
-    if cached is not None and not cached.isNull():
-        return cached
-
+    """Return a square thumbnail pixmap for catalog rows, with a fallback placeholder."""
     candidates = []
     if image_path:
         candidates.append(resolve_local_path(image_path))
@@ -109,14 +82,11 @@ def catalog_image_pixmap(image_path: str, size: int = 64) -> QPixmap:
             if candidate and candidate.exists():
                 pix = QPixmap(str(candidate))
                 if not pix.isNull():
-                    thumb = pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                    CATALOG_PIXMAP_CACHE[cache_key] = thumb
-                    return thumb
+                    return pix.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         except Exception:
             pass
     fallback = QPixmap(size, size)
     fallback.fill(QColor("#1e1710"))
-    CATALOG_PIXMAP_CACHE[cache_key] = fallback
     return fallback
 
 DUNE_QSS = f"""
@@ -148,13 +118,13 @@ QLabel#BrandSub {{
 }}
 QPushButton#NavButton {{
     text-align: left;
-    padding: 18px 20px;
+    padding: 14px 18px;
     border: 1px solid transparent;
-    border-radius: 16px;
+    border-radius: 14px;
     background: #59080706;
     color: #e8d4a2;
-    font-size: 19px;
-    font-weight: 900;
+    font-size: 15px;
+    font-weight: 600;
 }}
 QPushButton#NavButton:hover {{
     background: #23D4AE63;
@@ -254,11 +224,6 @@ QTableWidget::item {{
 QTableWidget::item:selected {{
     background: #607452D8;
     color: #fff5d7;
-    border: 0px;
-}}
-QTableWidget::item:focus {{
-    border: 0px;
-    outline: none;
 }}
 QHeaderView::section {{
     background: #F41C1221;
@@ -879,58 +844,10 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.refresh_all()
         self._sync_running = False
-        self._last_auto_sync = 0.0
         self.guild_sync_timer = QTimer(self)
-        # Network sync runs on the UI thread right now, so keep it on a slower
-        # cadence to avoid the app feeling frozen every few seconds. Manual
-        # sync and save actions still push changes immediately.
-        self.guild_sync_timer.setInterval(60000)
+        self.guild_sync_timer.setInterval(5000)
         self.guild_sync_timer.timeout.connect(self.auto_sync_guild)
         self.guild_sync_timer.start()
-        QTimer.singleShot(1000, self.validate_saved_guild_membership)
-
-    def validate_saved_guild_membership(self):
-        """Reconnect saved guild identity after launch without resetting the user.
-
-        Updates must preserve data/stanky_market.sqlite3. If a saved guild exists,
-        verify it remotely and sync fresh data; if it was deleted, clear only the
-        stale local guild state.
-        """
-        guild = db.get_setting("guild_code", "").upper()
-        display_name = db.get_setting("display_name", "")
-        url, key = active_supabase()
-        if not guild or not display_name or not url or not key:
-            return
-        try:
-            found = supabase_request("GET", url, key, f"guilds?guild_code=eq.{urllib.parse.quote(guild)}&select=*&limit=1")
-            if not found:
-                db.clear_local_guild_cache(guild)
-                self._clear_local_guild_identity()
-                self.update_guild_button_visibility()
-                self.refresh_dashboard()
-                return
-            member = supabase_request(
-                "GET", url, key,
-                f"guild_members?guild_code=eq.{urllib.parse.quote(guild)}&display_name=eq.{urllib.parse.quote(display_name)}&select=role&limit=1",
-            )
-            if not member:
-                # Do not silently recreate a membership if the user was deliberately removed.
-                db.clear_local_guild_cache(guild)
-                self._clear_local_guild_identity()
-                self.update_guild_button_visibility()
-                self.refresh_dashboard()
-                return
-            db.set_setting("guild_name", found[0].get("guild_name", db.get_setting("guild_name", "")) or "")
-            db.set_setting("guild_role", (member[0].get("role") or db.get_setting("guild_role", "member")))
-            self.sync_guild_pois(show_popup=False)
-            self.sync_guild_bases(show_popup=False)
-            self.sync_guild_dashboard_content(show_errors=False)
-            self.refresh_guild_members()
-            self.update_guild_button_visibility()
-            self.refresh_dashboard()
-        except Exception:
-            # Offline startup should use the existing cache without kicking the user out.
-            pass
 
     def _build_ui(self):
         root = QWidget()
@@ -942,7 +859,7 @@ class MainWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("SideBar")
-        sidebar.setFixedWidth(430)
+        sidebar.setFixedWidth(250)
         side_layout = QVBoxLayout(sidebar)
         side_layout.setContentsMargins(22, 28, 22, 22)
         brand = QLabel("STANKY\nTOOLS")
@@ -959,26 +876,21 @@ class MainWindow(QMainWindow):
         page_specs = [
             ("Dashboard", "dashboard_small.png", self._build_dashboard_page),
             ("Market", "market_small.png", self._build_market_page),
+            ("Catalog", "catalog_small.png", self._build_catalog_page),
+            ("Scanner", "scanner_small.png", self._build_scanner_page),
             ("Deep Desert", "deep_desert_small.png", self._build_deep_desert_page),
             ("Hagga Basin", "hagga_basin_small.png", self._build_hagga_basin_page),
-            ("Guild", "guild_small.png", self._build_guild_page),
             ("Settings", "settings_small.png", self._build_settings_page),
         ]
-        self.guild_page_index = 4
         for idx, (label, icon_name, builder) in enumerate(page_specs):
             btn = QPushButton("  " + label)
             icon_path = asset_path("icons", icon_name)
             if icon_path.exists():
                 btn.setIcon(QIcon(str(icon_path)))
-                btn.setIconSize(QSize(176, 176))
-            btn.setMinimumHeight(210)
+                btn.setIconSize(QSize(24, 24))
             btn.setObjectName("NavButton")
             btn.setProperty("active", idx == 0)
-            if label == "Guild":
-                self.guild_nav_button = btn
-                btn.clicked.connect(lambda checked=False: self.open_guild_admin_page())
-            else:
-                btn.clicked.connect(lambda checked=False, i=idx: self.set_page(i))
+            btn.clicked.connect(lambda checked=False, i=idx: self.set_page(i))
             self.nav_buttons.append(btn)
             side_layout.addWidget(btn)
             self.pages.addWidget(builder())
@@ -987,41 +899,13 @@ class MainWindow(QMainWindow):
 
         main.addWidget(sidebar)
         main.addWidget(self.pages, 1)
-        self.update_guild_nav_visibility()
 
     def set_page(self, index: int):
-        # Guild page is an admin-only area. Members can see public guild info on the dashboard,
-        # but they cannot open the admin section.
-        if index == getattr(self, "guild_page_index", 4) and not role_can_manage_guild():
-            QMessageBox.information(self, "Guild Admin", "The Guild section is available to owners and officers only.")
-            index = 0
         self.pages.setCurrentIndex(index)
         for i, btn in enumerate(self.nav_buttons):
             btn.setProperty("active", i == index)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
-        self.update_guild_nav_visibility()
-
-    def open_guild_admin_page(self):
-        if not role_can_manage_guild():
-            QMessageBox.information(self, "Guild Admin", "The Guild section is available to owners and officers only.")
-            return
-        self.set_page(getattr(self, "guild_page_index", 4))
-
-    def update_guild_nav_visibility(self):
-        btn = getattr(self, "guild_nav_button", None)
-        admin = role_can_manage_guild()
-        if btn is not None:
-            btn.setVisible(admin)
-        if hasattr(self, "dashboard_guild_button"):
-            self.dashboard_guild_button.setVisible(admin)
-        if hasattr(self, "pages") and self.pages.currentIndex() == getattr(self, "guild_page_index", 4) and not admin:
-            self.pages.setCurrentIndex(0)
-
-    def open_market_tab(self, tab_index: int = 0):
-        self.set_page(1)
-        if hasattr(self, "market_tabs"):
-            self.market_tabs.setCurrentIndex(max(0, min(tab_index, self.market_tabs.count() - 1)))
 
     def _page_shell(self, title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout]:
         page = QWidget()
@@ -1063,21 +947,11 @@ class MainWindow(QMainWindow):
         layout.addLayout(self.stat_grid)
 
         command_row = QHBoxLayout()
-        self.dashboard_links_table = StankyTable(["Title", "URL", "Poster"])
-        self.news_table = StankyTable(["Date", "Poster", "Guild News"])
-        self.dashboard_links_table.setWordWrap(True)
-        self.news_table.setWordWrap(True)
-        self.dashboard_links_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.dashboard_links_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.dashboard_links_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.dashboard_links_table.cellDoubleClicked.connect(self.open_selected_dashboard_link)
-        self.news_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.news_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.news_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.news_table.cellDoubleClicked.connect(self.show_dashboard_news_detail)
+        self.progress_table = StankyTable(["Category", "Observed", "Total", "Complete"])
+        self.recent_table = StankyTable(["Item Name", "Price", "Observed"])
 
-        links_panel = self._panel("Useful Links", self.dashboard_links_table)
-        news_panel = self._panel("Guild News", self.news_table)
+        progress_panel = self._panel("Market Coverage", self.progress_table)
+        recent_panel = self._panel("Recent Market Activity", self.recent_table)
 
         guild_card = QFrame()
         guild_card.setObjectName("Panel")
@@ -1086,54 +960,40 @@ class MainWindow(QMainWindow):
         title = QLabel("Guild Operations")
         title.setObjectName("SectionTitle")
         self.dashboard_guild_logo = QLabel()
-        self.dashboard_guild_logo.setMinimumSize(620, 620)
-        self.dashboard_guild_logo.setMaximumSize(1200, 1200)
+        self.dashboard_guild_logo.setFixedSize(220, 220)
         self.dashboard_guild_logo.setAlignment(Qt.AlignCenter)
-        self.dashboard_guild_logo.setStyleSheet("border:0px; background:transparent; padding:0px;")
+        self.dashboard_guild_logo.setStyleSheet("border:3px solid #d4ae63; border-radius:24px; background:#120f0c; padding:10px;")
         self.dashboard_guild_name = QLabel("Guild: " + (db.get_setting("guild_name", "Guild") or "Guild"))
-        self.dashboard_guild_name.setAlignment(Qt.AlignCenter)
-        self.dashboard_guild_name.setStyleSheet("font-size:24px; font-weight:900; color:#fff0bf;")
+        self.dashboard_guild_name.setStyleSheet("font-size:22px; font-weight:800; color:#fff0bf;")
         self.dashboard_user = QLabel("Profile: " + (db.get_setting("display_name", "Not joined") or "Not joined"))
-        self.dashboard_user.setAlignment(Qt.AlignCenter)
         self.dashboard_user.setStyleSheet("color:#d4ae63; font-size:15px;")
-        self.dashboard_members = QLabel("Members: —")
-        self.dashboard_members.setAlignment(Qt.AlignCenter)
-        self.dashboard_members.setStyleSheet("color:#f0dfb5; font-size:18px; font-weight:800;")
         quick = QHBoxLayout()
-        b1 = QPushButton("Hagga Basin")
-        b1.clicked.connect(lambda: self.set_page(3))
-        b2 = QPushButton("Deep Desert")
-        b2.clicked.connect(lambda: self.set_page(2))
-        b3 = QPushButton("Guild")
+        b1 = QPushButton("Open Hagga Basin")
+        b1.clicked.connect(lambda: self.set_page(5))
+        b2 = QPushButton("Open Deep Desert")
+        b2.clicked.connect(lambda: self.set_page(4))
+        b3 = QPushButton("Scanner")
         b3.setObjectName("PrimaryButton")
-        self.dashboard_guild_button = b3
-        b3.clicked.connect(self.open_guild_admin_page)
+        b3.clicked.connect(lambda: self.set_page(3))
         quick.addWidget(b1)
         quick.addWidget(b2)
         quick.addWidget(b3)
         guild_layout.addWidget(title)
-        guild_layout.addWidget(self.dashboard_guild_logo, 1, alignment=Qt.AlignCenter)
+        guild_layout.addWidget(self.dashboard_guild_logo, alignment=Qt.AlignCenter)
         guild_layout.addWidget(self.dashboard_guild_name)
         guild_layout.addWidget(self.dashboard_user)
-        guild_layout.addWidget(self.dashboard_members)
         guild_layout.addSpacing(10)
         guild_layout.addLayout(quick)
+        guild_layout.addStretch()
 
-        command_row.addWidget(links_panel, 2)
-        command_row.addWidget(news_panel, 2)
+        command_row.addWidget(progress_panel, 2)
+        command_row.addWidget(recent_panel, 2)
         command_row.addWidget(guild_card, 1)
         layout.addLayout(command_row, 1)
         return page
 
     def _build_market_page(self) -> QWidget:
-        page, layout = self._page_shell("Market", "Market, catalog, and scanner command center.")
-        self.market_tabs = QTabWidget()
-        self.market_tabs.setDocumentMode(True)
-
-        # Market tab
-        market_tab = QWidget()
-        market_layout = QVBoxLayout(market_tab)
-        market_layout.setContentsMargins(0, 0, 0, 0)
+        page, layout = self._page_shell("Market", "Low. Average. High.")
         controls = QHBoxLayout()
         self.market_search = QLineEdit()
         self.market_search.setPlaceholderText("Search market...")
@@ -1143,89 +1003,9 @@ class MainWindow(QMainWindow):
         record_btn.clicked.connect(self.record_selected_market_price)
         controls.addWidget(self.market_search, 1)
         controls.addWidget(record_btn)
-        market_layout.addLayout(controls)
+        layout.addLayout(controls)
         self.market_table = StankyTable(["Name", "Category", "Grade", "Lowest Price", "Avg Price", "Highest Price", "Seen", "Last Updated"])
-        market_layout.addWidget(self.market_table, 1)
-
-        # Catalog tab
-        catalog_tab = QWidget()
-        catalog_layout = QVBoxLayout(catalog_tab)
-        catalog_layout.setContentsMargins(0, 0, 0, 0)
-        catalog_controls = QHBoxLayout()
-        self.catalog_search = QLineEdit()
-        self.catalog_search.setPlaceholderText("Search item name...")
-        self.catalog_search.textChanged.connect(self.refresh_catalog)
-        self.catalog_category = QComboBox()
-        self.catalog_category.currentTextChanged.connect(self.refresh_catalog)
-        self.catalog_import_button = QPushButton("Import Dune Item Database")
-        self.catalog_import_button.clicked.connect(self.import_catalog)
-        catalog_controls.addWidget(self.catalog_search, 2)
-        catalog_controls.addWidget(self.catalog_category, 1)
-        catalog_controls.addWidget(self.catalog_import_button)
-        catalog_layout.addLayout(catalog_controls)
-        self.catalog_import_status = QLabel("Ready.")
-        self.catalog_import_status.setStyleSheet("color:#9f8150;")
-        self.catalog_import_progress = QProgressBar()
-        self.catalog_import_progress.setRange(0, 1)
-        self.catalog_import_progress.setValue(0)
-        self.catalog_import_progress.setVisible(False)
-        catalog_layout.addWidget(self.catalog_import_status)
-        catalog_layout.addWidget(self.catalog_import_progress)
-        self.catalog_table = StankyTable(["Image", "Name", "Category"])
-        self.catalog_table.setIconSize(QSize(72, 72))
-        self.catalog_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.catalog_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.catalog_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.catalog_table.cellDoubleClicked.connect(self.open_catalog_item)
-        catalog_layout.addWidget(self.catalog_table, 1)
-
-        # Scanner tab
-        scanner_tab = QWidget()
-        scanner_layout = QVBoxLayout(scanner_tab)
-        scanner_layout.setContentsMargins(0, 0, 0, 0)
-        panel = QFrame()
-        panel.setObjectName("Panel")
-        p = QVBoxLayout(panel)
-        p.setContentsMargins(24, 24, 24, 24)
-        label = QLabel("Auction House Scanner")
-        label.setObjectName("SectionTitle")
-        help_text = QLabel("Choose an item from the catalog, then scan or enter the auction price. The scanner only updates price history for the selected item; it never guesses names or images.")
-        help_text.setWordWrap(True)
-        p.addWidget(label)
-        p.addWidget(help_text)
-        form = QFormLayout()
-        self.scan_category = QComboBox()
-        self.scan_item = QComboBox()
-        self.scan_price = QSpinBox()
-        self.scan_price.setRange(1, 2_000_000_000)
-        self.scan_price.setSingleStep(1000)
-        self.scan_grade = QComboBox()
-        self.scan_grade.addItems(["No Grade", "Grade 0", "Grade 1", "Grade 2", "Grade 3", "Grade 4", "Grade 5"])
-        self.scan_status = QLabel("Ready. Select item and record price.")
-        self.scan_category.currentTextChanged.connect(self.refresh_scan_items)
-        form.addRow("Category", self.scan_category)
-        form.addRow("Catalog Item", self.scan_item)
-        form.addRow("Price", self.scan_price)
-        form.addRow("Grade", self.scan_grade)
-        p.addLayout(form)
-        buttons = QHBoxLayout()
-        save = QPushButton("Record Price")
-        save.setObjectName("PrimaryButton")
-        save.clicked.connect(self.record_scanner_price)
-        ocr = QPushButton("OCR Price From Image...")
-        ocr.clicked.connect(self.ocr_price_from_file)
-        buttons.addWidget(save)
-        buttons.addWidget(ocr)
-        buttons.addStretch()
-        p.addLayout(buttons)
-        p.addWidget(self.scan_status)
-        p.addStretch()
-        scanner_layout.addWidget(panel, 1)
-
-        self.market_tabs.addTab(market_tab, "Market")
-        self.market_tabs.addTab(catalog_tab, "Catalog")
-        self.market_tabs.addTab(scanner_tab, "Scanner")
-        layout.addWidget(self.market_tabs, 1)
+        layout.addWidget(self.market_table, 1)
         return page
 
     def _build_catalog_page(self) -> QWidget:
@@ -1400,92 +1180,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(body, 1)
         return page
 
-    def _build_guild_page(self) -> QWidget:
-        page, layout = self._page_shell("Guild", "Members, roles, news, links, and command updates.")
-        body = QHBoxLayout()
-
-        members_panel = QFrame()
-        members_panel.setObjectName("Panel")
-        members_layout = QVBoxLayout(members_panel)
-        members_layout.setContentsMargins(16, 16, 16, 16)
-        members_title = QLabel("Members & Roles")
-        members_title.setObjectName("SectionTitle")
-        members_layout.addWidget(members_title)
-        self.guild_page_members = StankyTable(["Member", "Role"])
-        self.guild_page_members.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.guild_page_members.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        members_layout.addWidget(self.guild_page_members, 1)
-        member_buttons = QHBoxLayout()
-        refresh_members = QPushButton("Refresh Members")
-        refresh_members.clicked.connect(self.refresh_guild_page)
-        manage_members = QPushButton("Manage Members")
-        manage_members.setObjectName("PrimaryButton")
-        manage_members.clicked.connect(self.show_members_roles_dialog)
-        member_buttons.addWidget(refresh_members)
-        member_buttons.addWidget(manage_members)
-        members_layout.addLayout(member_buttons)
-
-        right_panel = QFrame()
-        right_panel.setObjectName("Panel")
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(16, 16, 16, 16)
-        news_title = QLabel("Guild News")
-        news_title.setObjectName("SectionTitle")
-        right_layout.addWidget(news_title)
-        self.guild_page_news = StankyTable(["Date", "Poster", "Update"])
-        self.guild_page_news.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.guild_page_news.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.guild_page_news.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.guild_page_news.cellDoubleClicked.connect(self.show_guild_news_detail)
-        right_layout.addWidget(self.guild_page_news, 1)
-        news_buttons = QHBoxLayout()
-        add_news = QPushButton("Submit Guild Update")
-        add_news.setObjectName("PrimaryButton")
-        add_news.clicked.connect(self.submit_guild_news)
-        delete_news = QPushButton("Delete News")
-        delete_news.clicked.connect(self.delete_selected_guild_news)
-        news_buttons.addWidget(add_news)
-        news_buttons.addWidget(delete_news)
-        news_buttons.addStretch()
-        right_layout.addLayout(news_buttons)
-
-        links_title = QLabel("Useful Links")
-        links_title.setObjectName("SectionTitle")
-        right_layout.addWidget(links_title)
-        self.guild_page_links = StankyTable(["Title", "URL", "Poster"])
-        self.guild_page_links.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.guild_page_links.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.guild_page_links.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.guild_page_links.cellDoubleClicked.connect(self.open_selected_guild_link)
-        right_layout.addWidget(self.guild_page_links, 1)
-        link_buttons = QHBoxLayout()
-        add_link = QPushButton("Add Link")
-        add_link.clicked.connect(self.add_guild_link)
-        edit_link = QPushButton("Edit Link")
-        edit_link.clicked.connect(self.edit_guild_link)
-        delete_link = QPushButton("Delete Link")
-        delete_link.clicked.connect(self.delete_guild_link)
-        link_buttons.addWidget(add_link)
-        link_buttons.addWidget(edit_link)
-        link_buttons.addWidget(delete_link)
-        link_buttons.addStretch()
-        right_layout.addLayout(link_buttons)
-
-        activity_title = QLabel("Activity Feed")
-        activity_title.setObjectName("SectionTitle")
-        right_layout.addWidget(activity_title)
-        self.guild_page_activity = StankyTable(["Date", "Actor", "Activity"])
-        self.guild_page_activity.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.guild_page_activity.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.guild_page_activity.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        right_layout.addWidget(self.guild_page_activity, 1)
-
-        body.addWidget(members_panel, 1)
-        body.addWidget(right_panel, 2)
-        layout.addLayout(body, 1)
-        QTimer.singleShot(250, self.refresh_guild_page)
-        return page
-
     def _build_settings_page(self) -> QWidget:
         page, layout = self._page_shell("Settings", "Guild identity and app setup.")
         panel = QFrame()
@@ -1571,8 +1265,14 @@ class MainWindow(QMainWindow):
         test.clicked.connect(self.test_supabase_connection)
         refresh_map = QPushButton("Refresh Deep Desert Map")
         refresh_map.clicked.connect(self.check_map_update)
+        open_data = QPushButton("Open Data Folder")
+        open_data.clicked.connect(lambda: webbrowser.open(str(db.DATA_DIR)))
+        open_logs = QPushButton("Open Logs Folder")
+        open_logs.clicked.connect(lambda: webbrowser.open(str(PROJECT_ROOT / "logs")))
         maintenance_buttons.addWidget(test)
         maintenance_buttons.addWidget(refresh_map)
+        maintenance_buttons.addWidget(open_data)
+        maintenance_buttons.addWidget(open_logs)
         maintenance_buttons.addStretch()
         maintenance_layout.addWidget(maintenance_title)
         maintenance_layout.addLayout(maintenance_buttons)
@@ -1611,59 +1311,26 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         try:
             info = updater.check_for_update()
-            if not info.update_available:
+            if info.update_available:
+                message = (
+                    f"A new StankyTools version is available.\n\n"
+                    f"Current: {info.current_version}\n"
+                    f"Latest: {info.latest_version}\n\n"
+                    "Open the release page to download the newest build?"
+                )
+                if hasattr(self, "update_status"):
+                    self.update_status.setText(f"Update available: {info.latest_version}")
+                choice = QMessageBox.question(self, "Update Available", message)
+                if choice == QMessageBox.Yes:
+                    webbrowser.open(info.html_url)
+            else:
                 if hasattr(self, "update_status"):
                     self.update_status.setText(f"StankyTools is current ({info.current_version}).")
-                message = info.message or f"You are already on the latest version: {info.current_version}"
-                QMessageBox.information(self, "No Update", message)
-                return
-
-            if hasattr(self, "update_status"):
-                self.update_status.setText(f"Update available: {info.latest_version}")
-            message = (
-                f"A new StankyTools version is available.\n\n"
-                f"Current: {info.current_version}\n"
-                f"Latest: {info.latest_version}\n\n"
-                "Download and install it now?"
-            )
-            if QMessageBox.question(self, "Update Available", message) != QMessageBox.Yes:
-                return
-
-            progress = QProgressDialog("Downloading update...", "Cancel", 0, 100, self)
-            progress.setWindowTitle("StankyTools Update")
-            progress.setWindowModality(Qt.WindowModal)
-            progress.setMinimumDuration(0)
-            progress.setValue(0)
-
-            def on_progress(done: int, total: int):
-                if total > 0:
-                    progress.setValue(max(0, min(100, int((done / total) * 100))))
-                QApplication.processEvents()
-                if progress.wasCanceled():
-                    raise RuntimeError("Update download canceled.")
-
-            zip_path = updater.download_update(info, progress=on_progress)
-            progress.setValue(100)
-            if hasattr(self, "update_status"):
-                self.update_status.setText("Update downloaded. Restart required.")
-
-            if not updater.is_packaged_app():
-                QMessageBox.information(
-                    self,
-                    "Update Downloaded",
-                    "The update ZIP was downloaded, but automatic install only works in the packaged EXE build. "
-                    "When testing from `py main.py`, update from the GitHub release manually.",
-                )
-                webbrowser.open(info.html_url)
-                return
-
-            if QMessageBox.question(self, "Restart to Update", "Update downloaded. Restart StankyTools now to install it?") == QMessageBox.Yes:
-                updater.stage_update_and_restart(zip_path)
-                QApplication.quit()
+                QMessageBox.information(self, "No Update", f"You are already on the latest version: {info.current_version}")
         except Exception as exc:
             if hasattr(self, "update_status"):
-                self.update_status.setText("Could not update StankyTools.")
-            QMessageBox.critical(self, "Update Failed", str(exc))
+                self.update_status.setText("Could not check for updates.")
+            QMessageBox.critical(self, "Update Check Failed", str(exc))
 
     def _panel(self, title: str, content: QWidget) -> QFrame:
         panel = QFrame()
@@ -1691,30 +1358,34 @@ class MainWindow(QMainWindow):
             item = self.stat_grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        guild = db.get_setting("guild_code", "").upper()
-        if guild:
-            self.sync_guild_dashboard_content(show_errors=False)
         if hasattr(self, "dashboard_guild_name"):
-            self.dashboard_guild_name.setText(db.get_setting("guild_name", "Guild") or "Guild")
+            self.dashboard_guild_name.setText("Guild: " + (db.get_setting("guild_name", "Guild") or "Guild"))
         if hasattr(self, "dashboard_user"):
             self.dashboard_user.setText("Profile: " + (db.get_setting("display_name", "Not joined") or "Not joined"))
-        if hasattr(self, "dashboard_members"):
-            members = getattr(self, "current_guild_members", None) or self.refresh_guild_members()
-            self.dashboard_members.setText(f"Members: {len(members)}" if guild else "Members: —")
         if hasattr(self, "dashboard_guild_logo"):
             self.refresh_dashboard_guild_logo()
         stats = db.dashboard_stats()
-        base_count = len(db.list_bases(guild)) if guild else 0
-        members_count = len(getattr(self, "current_guild_members", []) or []) if guild else 0
         cards = [
-            StatCard("Guild Members", fmt_price(members_count), "Current roster"),
-            StatCard("Guild Bases", fmt_price(base_count), "Hagga Basin"),
+            StatCard("Items Tracked", fmt_price(stats.get("catalog_items", 0)), "Across 9 categories"),
+            StatCard("Observed Items", fmt_price(stats.get("observed_items", 0)), "Market coverage"),
+            StatCard("Price Reads", fmt_price(stats.get("observations", 0)), "History records"),
             StatCard("Guild POIs", fmt_price(stats.get("pois", 0)), "Deep Desert intel"),
-            StatCard("Items Tracked", fmt_price(stats.get("catalog_items", 0)), "Catalog database"),
         ]
         for i, card in enumerate(cards):
             self.stat_grid.addWidget(card, 0, i)
-        self.refresh_dashboard_activity_tables()
+        self.progress_table.setSortingEnabled(False)
+        self.progress_table.setRowCount(0)
+        for row in db.category_progress():
+            total = int(row["total"] or 0)
+            observed = int(row["observed"] or 0)
+            pct = f"{round((observed / total) * 100) if total else 0}%"
+            self.progress_table.add_row([row["category"], observed, total, pct], {1, 2})
+        self.progress_table.setSortingEnabled(True)
+        self.recent_table.setSortingEnabled(False)
+        self.recent_table.setRowCount(0)
+        for row in db.recent_observations(12):
+            self.recent_table.add_row([row["name"], row["price"], row["observed_at"]], {1})
+        self.recent_table.setSortingEnabled(True)
 
     def refresh_catalog_categories(self):
         if not hasattr(self, "catalog_category"):
@@ -1737,7 +1408,6 @@ class MainWindow(QMainWindow):
         category = self.catalog_category.currentText() if hasattr(self, "catalog_category") else ""
         rows = db.list_catalog(search, category)
         self.current_catalog_rows = rows
-        self.catalog_table.setUpdatesEnabled(False)
         self.catalog_table.setSortingEnabled(False)
         self.catalog_table.setRowCount(0)
         for row in rows:
@@ -1765,14 +1435,12 @@ class MainWindow(QMainWindow):
             self.catalog_table.setItem(table_row, 2, category_item)
             self.catalog_table.setRowHeight(table_row, 82)
         self.catalog_table.setSortingEnabled(True)
-        self.catalog_table.setUpdatesEnabled(True)
 
     def refresh_market(self):
         if not hasattr(self, "market_table"):
             return
         rows = db.market_summary(self.market_search.text() if hasattr(self, "market_search") else "")
         self.current_market_rows = rows
-        self.market_table.setUpdatesEnabled(False)
         self.market_table.setSortingEnabled(False)
         self.market_table.setRowCount(0)
         for row in rows:
@@ -1788,7 +1456,6 @@ class MainWindow(QMainWindow):
                 row["last_seen"] or "—",
             ], {3, 4, 5, 6})
         self.market_table.setSortingEnabled(True)
-        self.market_table.setUpdatesEnabled(True)
 
     def selected_market_item_id(self) -> tuple[int, str] | None:
         row_idx = self.market_table.currentRow()
@@ -1902,13 +1569,6 @@ class MainWindow(QMainWindow):
         self.refresh_hagga_map()
         if not hasattr(self, "map_view"):
             return
-        static_map = PROJECT_ROOT / "data" / "deep_desert_map.png"
-        if static_map.exists():
-            self.map_view.set_map(str(static_map))
-            self.refresh_pois()
-            if hasattr(self, "poi_sync_status"):
-                self.poi_sync_status.setText("Deep Desert map loaded from local tactical grid.")
-            return
         meta = deep_desert.load_meta()
         image_path = meta.get("image_path", "")
         image_file = Path(image_path)
@@ -1972,31 +1632,16 @@ class MainWindow(QMainWindow):
             return
         if not db.get_setting("guild_code", "") or not db.get_setting("display_name", ""):
             return
-        now = time.monotonic()
-        if now - getattr(self, "_last_auto_sync", 0.0) < 45:
-            return
-        self._last_auto_sync = now
         self.sync_guild_pois(show_popup=False)
         self.sync_guild_bases(show_popup=False)
-        self.sync_guild_dashboard_content(show_errors=False)
 
     def refresh_activity(self):
         # Guild Activity feed has been removed from the UI.
         return
 
     def log_guild_activity(self, message: str, poi_id: int | None = None):
-        guild = db.get_setting("guild_code", "").upper()
-        actor = db.get_setting("display_name", "") or "System"
-        url, key = active_supabase()
-        if not guild or not url or not key:
-            return
-        try:
-            payload = [{"guild_code": guild, "actor": actor, "message": message}]
-            supabase_request("POST", url, key, "guild_activity", payload)
-            self.sync_guild_dashboard_content(show_errors=False)
-            self.refresh_dashboard_activity_tables()
-        except Exception:
-            pass
+        # Guild Activity feed has been removed from the UI.
+        return
 
     def delete_remote_poi(self, poi):
         url, key = active_supabase()
@@ -2113,258 +1758,6 @@ class MainWindow(QMainWindow):
         finally:
             self._sync_running = False
 
-
-    def refresh_dashboard_activity_tables(self):
-        guild = db.get_setting("guild_code", "").upper()
-        if hasattr(self, "dashboard_links_table"):
-            self.dashboard_links_table.setSortingEnabled(False)
-            self.dashboard_links_table.setRowCount(0)
-            self.current_dashboard_links = db.list_guild_links(guild, 12)
-            for row in self.current_dashboard_links:
-                self.dashboard_links_table.add_row([row["title"] or "Untitled", row["url"] or "", row["created_by"] or "—"])
-            self.dashboard_links_table.setSortingEnabled(True)
-            self.dashboard_links_table.resizeRowsToContents()
-        if hasattr(self, "news_table"):
-            self.news_table.setSortingEnabled(False)
-            self.news_table.setRowCount(0)
-            self.current_dashboard_news = db.list_guild_news(guild, 12)
-            for row in self.current_dashboard_news:
-                title_body = (row["title"] or "Guild Update")
-                if row["body"]:
-                    title_body += " — " + str(row["body"]).replace("\n", " ")
-                self.news_table.add_row([
-                    format_app_date(row["created_at"]),
-                    row["created_by"] or "—",
-                    title_body,
-                ])
-            self.news_table.setSortingEnabled(True)
-            self.news_table.resizeRowsToContents()
-
-    def refresh_guild_page(self):
-        guild = db.get_setting("guild_code", "").upper()
-        self.sync_guild_dashboard_content(show_errors=False)
-        if hasattr(self, "guild_page_members"):
-            self.guild_page_members.setSortingEnabled(False)
-            self.guild_page_members.setRowCount(0)
-            for item in getattr(self, "current_guild_members", []) or []:
-                self.guild_page_members.add_row([item.get("display_name", ""), item.get("role", "member")])
-            self.guild_page_members.setSortingEnabled(True)
-        if hasattr(self, "guild_page_news"):
-            self.guild_page_news.setSortingEnabled(False)
-            self.guild_page_news.setRowCount(0)
-            self.current_guild_news = db.list_guild_news(guild, 30)
-            for row in self.current_guild_news:
-                text = (row["title"] or "Guild Update")
-                if row["body"]:
-                    text += " — " + str(row["body"]).replace("\n", " ")
-                self.guild_page_news.add_row([format_app_date(row["created_at"]), row["created_by"] or "—", text])
-            self.guild_page_news.setSortingEnabled(True)
-        if hasattr(self, "guild_page_links"):
-            self.guild_page_links.setSortingEnabled(False)
-            self.guild_page_links.setRowCount(0)
-            self.current_guild_links = db.list_guild_links(guild, 50)
-            for row in self.current_guild_links:
-                self.guild_page_links.add_row([row["title"] or "Untitled", row["url"] or "", row["created_by"] or "—"])
-            self.guild_page_links.setSortingEnabled(True)
-        if hasattr(self, "guild_page_activity"):
-            self.guild_page_activity.setSortingEnabled(False)
-            self.guild_page_activity.setRowCount(0)
-            for row in db.list_guild_activity(guild, 40):
-                self.guild_page_activity.add_row([format_app_date(row["created_at"]), row["actor"] or "—", row["message"] or "—"])
-            self.guild_page_activity.setSortingEnabled(True)
-            self.guild_page_activity.resizeRowsToContents()
-
-    def sync_guild_dashboard_content(self, show_errors: bool = False):
-        url, key = active_supabase()
-        guild = db.get_setting("guild_code", "").upper()
-        if not url or not key or not guild:
-            return
-        try:
-            news = supabase_request("GET", url, key, f"guild_news?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=created_at.desc&limit=30")
-            db.cache_guild_news(news, guild)
-        except Exception as exc:
-            if show_errors:
-                QMessageBox.warning(self, "Guild News", str(exc))
-        try:
-            activity = supabase_request("GET", url, key, f"guild_activity?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=created_at.desc&limit=40")
-            db.cache_guild_activity(activity, guild)
-        except Exception:
-            pass
-        try:
-            links = supabase_request("GET", url, key, f"guild_links?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=title.asc")
-            db.cache_guild_links(links, guild)
-        except Exception:
-            pass
-
-    def submit_guild_news(self):
-        if not self._current_guild_admin():
-            QMessageBox.warning(self, "Permission Denied", "Only owners/officers can submit guild news.")
-            return
-        guild = db.get_setting("guild_code", "").upper()
-        if not guild:
-            QMessageBox.information(self, "Guild News", "Join or create a guild first.")
-            return
-        title, ok = QInputDialog.getText(self, "Guild News", "Title:")
-        if not ok or not title.strip():
-            return
-        body, ok = QInputDialog.getMultiLineText(self, "Guild News", "Update:", "")
-        if not ok:
-            return
-        url, key = active_supabase()
-        try:
-            payload = [{
-                "guild_code": guild,
-                "title": title.strip(),
-                "body": body.strip(),
-                "created_by": db.get_setting("display_name", ""),
-            }]
-            supabase_request("POST", url, key, "guild_news", payload)
-            self.log_guild_activity(f"posted guild news: {title.strip()}")
-            self.refresh_guild_page()
-            self.refresh_dashboard()
-        except Exception as exc:
-            QMessageBox.critical(self, "Guild News Failed", str(exc))
-
-
-    def _news_row_from_table(self, table_name: str, row: int):
-        rows = getattr(self, "current_guild_news" if table_name == "guild" else "current_dashboard_news", []) or []
-        if 0 <= row < len(rows):
-            return rows[row]
-        return None
-
-    def show_dashboard_news_detail(self, row: int, col: int):
-        news = self._news_row_from_table("dashboard", row)
-        if not news:
-            return
-        title = news["title"] or "Guild Update"
-        body = news["body"] or "No details were provided."
-        QMessageBox.information(self, title, body)
-
-    def show_guild_news_detail(self, row: int, col: int):
-        news = self._news_row_from_table("guild", row)
-        if not news:
-            return
-        title = news["title"] or "Guild Update"
-        body = news["body"] or "No details were provided."
-        QMessageBox.information(self, title, body)
-
-    def delete_selected_guild_news(self):
-        if not self._current_guild_admin():
-            QMessageBox.warning(self, "Permission Denied", "Only owners/officers can delete guild news.")
-            return
-        if not hasattr(self, "guild_page_news"):
-            return
-        row = self.guild_page_news.currentRow()
-        news = self._news_row_from_table("guild", row)
-        if not news:
-            QMessageBox.information(self, "Guild News", "Select a news item first.")
-            return
-        rid = str(news["remote_id"] or "")
-        if not rid:
-            QMessageBox.warning(self, "Guild News", "This news item does not have a remote id yet. Refresh and try again.")
-            return
-        if QMessageBox.question(self, "Delete Guild News", "Delete this guild news update?") != QMessageBox.Yes:
-            return
-        try:
-            supabase_request("DELETE", *active_supabase(), f"guild_news?id=eq.{urllib.parse.quote(rid)}")
-            self.log_guild_activity("deleted a guild news update")
-            self.sync_guild_dashboard_content(show_errors=False)
-            self.refresh_guild_page()
-            self.refresh_dashboard()
-        except Exception as exc:
-            QMessageBox.critical(self, "Guild News Failed", str(exc))
-
-    def open_selected_dashboard_link(self, row: int, col: int):
-        links = getattr(self, "current_dashboard_links", []) or []
-        if 0 <= row < len(links):
-            url = links[row]["url"] or ""
-            if url:
-                webbrowser.open(url)
-
-    def add_guild_link(self):
-        if not self._current_guild_admin():
-            QMessageBox.warning(self, "Permission Denied", "Only owners/officers can add useful links.")
-            return
-        guild = db.get_setting("guild_code", "").upper()
-        if not guild:
-            QMessageBox.information(self, "Useful Links", "Join or create a guild first.")
-            return
-        title, ok = QInputDialog.getText(self, "Useful Link", "Title:")
-        if not ok or not title.strip():
-            return
-        link, ok = QInputDialog.getText(self, "Useful Link", "URL:")
-        if not ok or not link.strip():
-            return
-        if not link.lower().startswith(("http://", "https://")):
-            link = "https://" + link
-        try:
-            supabase_request("POST", *active_supabase(), "guild_links", [{
-                "guild_code": guild,
-                "title": title.strip(),
-                "url": link.strip(),
-                "created_by": db.get_setting("display_name", ""),
-            }])
-            self.log_guild_activity(f"added useful link: {title.strip()}")
-            self.refresh_guild_page()
-        except Exception as exc:
-            QMessageBox.critical(self, "Useful Link Failed", str(exc))
-
-    def selected_guild_link_remote_id(self) -> str:
-        if not hasattr(self, "guild_page_links"):
-            return ""
-        row = self.guild_page_links.currentRow()
-        if row < 0:
-            return ""
-        links = getattr(self, "current_guild_links", []) or []
-        if row >= len(links):
-            return ""
-        return str(links[row]["remote_id"] or "")
-
-    def open_selected_guild_link(self, row: int, col: int):
-        links = getattr(self, "current_guild_links", []) or []
-        if 0 <= row < len(links):
-            url = links[row]["url"] or ""
-            if url:
-                webbrowser.open(url)
-
-    def edit_guild_link(self):
-        if not self._current_guild_admin():
-            QMessageBox.warning(self, "Permission Denied", "Only owners/officers can edit useful links.")
-            return
-        rid = self.selected_guild_link_remote_id()
-        if not rid:
-            QMessageBox.information(self, "Useful Links", "Select a link first.")
-            return
-        row = self.guild_page_links.currentRow()
-        links = getattr(self, "current_guild_links", []) or []
-        old = links[row] if 0 <= row < len(links) else None
-        title, ok = QInputDialog.getText(self, "Useful Link", "Title:", text=(old["title"] if old else ""))
-        if not ok or not title.strip():
-            return
-        link, ok = QInputDialog.getText(self, "Useful Link", "URL:", text=(old["url"] if old else ""))
-        if not ok or not link.strip():
-            return
-        try:
-            supabase_request("PATCH", *active_supabase(), f"guild_links?id=eq.{urllib.parse.quote(rid)}", {"title": title.strip(), "url": link.strip()})
-            self.refresh_guild_page()
-        except Exception as exc:
-            QMessageBox.critical(self, "Useful Link Failed", str(exc))
-
-    def delete_guild_link(self):
-        if not self._current_guild_admin():
-            QMessageBox.warning(self, "Permission Denied", "Only owners/officers can delete useful links.")
-            return
-        rid = self.selected_guild_link_remote_id()
-        if not rid:
-            QMessageBox.information(self, "Useful Links", "Select a link first.")
-            return
-        if QMessageBox.question(self, "Delete Link", "Delete this useful link?") != QMessageBox.Yes:
-            return
-        try:
-            supabase_request("DELETE", *active_supabase(), f"guild_links?id=eq.{urllib.parse.quote(rid)}")
-            self.refresh_guild_page()
-        except Exception as exc:
-            QMessageBox.critical(self, "Useful Link Failed", str(exc))
 
     def refresh_scan_categories(self):
         """Populate scanner category dropdown from the catalog."""
@@ -2528,8 +1921,6 @@ class MainWindow(QMainWindow):
             poi_type = current_type or "Custom"
             defeated = False
         db.update_poi(poi_id, poi_type, note, pooped_on=defeated, updated_by=db.get_setting("display_name", ""))
-        # Redraw immediately so Defeated turns grey without waiting for the next sync cycle.
-        self.refresh_pois()
         self.sync_guild_pois(show_popup=False)
         self.refresh_pois()
         self.refresh_dashboard()
@@ -2586,7 +1977,6 @@ class MainWindow(QMainWindow):
             status_item = self.poi_table.item(self.poi_table.currentRow(), 1)
             pooped = (status_item.text().lower() == "defeated") if status_item else False
         db.update_poi(poi_id, poi_type, note, pooped_on=pooped, updated_by=db.get_setting("display_name", ""))
-        self.log_guild_activity(f"updated POI: {poi_type}")
         self.sync_guild_pois(show_popup=False)
         self.refresh_pois()
         self.refresh_dashboard()
@@ -2605,7 +1995,6 @@ class MainWindow(QMainWindow):
             return
         self.delete_remote_poi(poi)
         db.delete_poi(poi_id)
-        self.log_guild_activity("deleted a POI")
         self.refresh_pois()
         self.refresh_dashboard()
 
@@ -2655,7 +2044,6 @@ class MainWindow(QMainWindow):
         guild = db.get_setting("guild_code", "").upper()
         user = db.get_setting("display_name", "")
         db.add_poi(x, y, poi_type, note, guild_code=guild, poi_type=poi_type, created_by=user)
-        self.log_guild_activity(f"added POI: {poi_type}")
         self.sync_guild_pois(show_popup=False)
         self.refresh_pois()
         self.refresh_dashboard()
@@ -2768,7 +2156,6 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         db.add_base(x, y, base_name.strip(), seitch, guild, user)
-        self.log_guild_activity(f"added base: {base_name.strip()}")
         self.sync_guild_bases(show_popup=False)
         self.refresh_bases()
         self.refresh_dashboard()
@@ -2795,7 +2182,6 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         db.update_base(base_id, base_name.strip(), seitch)
-        self.log_guild_activity(f"updated base: {base_name.strip()}")
         self.sync_guild_bases(show_popup=False)
         self.refresh_bases()
 
@@ -2817,7 +2203,6 @@ class MainWindow(QMainWindow):
             return
         self.delete_remote_base(base)
         db.delete_base(base_id)
-        self.log_guild_activity("deleted a base")
         self.refresh_bases()
         self.refresh_dashboard()
 
@@ -2831,10 +2216,20 @@ class MainWindow(QMainWindow):
         self.base_table.selectRow(row)
         self.center_on_base(row, 0)
         menu = QMenu(self)
+        friendly_action = menu.addAction("Set Friendly")
+        enemy_action = menu.addAction("Set Enemy")
+        defeated_action = menu.addAction("Set Defeated")
+        menu.addSeparator()
         edit_action = menu.addAction("Edit Base")
-        delete_action = menu.addAction("Remove Base")
+        delete_action = menu.addAction("Delete Base")
         chosen = menu.exec(self.base_table.viewport().mapToGlobal(pos))
-        if chosen == edit_action:
+        if chosen == friendly_action:
+            self.set_selected_base_status("friendly")
+        elif chosen == enemy_action:
+            self.set_selected_base_status("enemy")
+        elif chosen == defeated_action:
+            self.set_selected_base_status("defeated")
+        elif chosen == edit_action:
             self.edit_selected_base()
         elif chosen == delete_action:
             self.delete_selected_base()
@@ -2848,7 +2243,6 @@ class MainWindow(QMainWindow):
             return
         status = normalize_base_status(status)
         db.update_base_status(base_id, status)
-        self.log_guild_activity(f"set base status to {status}")
         self.sync_guild_bases(show_popup=False)
         self.refresh_bases()
 
@@ -3010,11 +2404,6 @@ class MainWindow(QMainWindow):
             return []
         try:
             rows = supabase_request("GET", url, key, f"guild_members?guild_code=eq.{urllib.parse.quote(guild)}&select=display_name,role&order=display_name.asc")
-            if not isinstance(rows, list):
-                rows = []
-            current_name = db.get_setting("display_name", "")
-            if current_name and not any((r.get("display_name", "") or "").strip().lower() == current_name.strip().lower() for r in rows if isinstance(r, dict)):
-                rows.append({"display_name": current_name, "role": db.get_setting("guild_role", "member") or "member"})
             self.current_guild_members = rows
             return rows
         except Exception as exc:
@@ -3148,7 +2537,6 @@ class MainWindow(QMainWindow):
             guild_name = db.get_setting("guild_name", "Guild") or "Guild"
             user = db.get_setting("display_name", "")
             self.guild_status.setText(f"Joined: {guild_name} as {user}" if joined else "Not joined yet.")
-        self.update_guild_nav_visibility()
         if joined:
             self.refresh_guild_members()
             self.sync_guild_logo_from_remote()
@@ -3171,35 +2559,30 @@ class MainWindow(QMainWindow):
         except Exception:
             return []
 
-
-    def _delete_remote_guild_completely(self, guild: str) -> None:
-        """Delete a guild and all remote rows tied to it. Safe to call more than once."""
-        url, key = active_supabase()
-        guild = (guild or "").upper()
-        if not url or not key or not guild:
-            return
-        # Delete children first so this works even if cascade is missing.
-        for table in ("guild_news", "guild_links", "guild_activity", "guild_bases", "guild_pois", "guild_members"):
-            try:
-                supabase_request("DELETE", url, key, f"{table}?guild_code=eq.{urllib.parse.quote(guild)}")
-            except Exception:
-                pass
-        try:
-            supabase_request("PATCH", url, key, f"guilds?guild_code=eq.{urllib.parse.quote(guild)}", {"logo_data": ""})
-        except Exception:
-            pass
-        try:
-            supabase_request("DELETE", url, key, f"guilds?guild_code=eq.{urllib.parse.quote(guild)}")
-        except Exception:
-            pass
-
     def _promote_next_owner_or_delete_guild(self, guild: str, previous_owner_left: bool = False) -> None:
         url, key = active_supabase()
         if not url or not key or not guild:
             return
         members = self._fetch_guild_members_remote(guild)
         if not members:
-            self._delete_remote_guild_completely(guild)
+            # Last member is gone. Remove every guild-owned remote record before deleting
+            # the guild row so older Supabase schemas without cascade rules also clean up.
+            try:
+                supabase_request("DELETE", url, key, f"guild_pois?guild_code=eq.{urllib.parse.quote(guild)}")
+            except Exception:
+                pass
+            try:
+                supabase_request("DELETE", url, key, f"guild_bases?guild_code=eq.{urllib.parse.quote(guild)}")
+            except Exception:
+                pass
+            try:
+                supabase_request("DELETE", url, key, f"guild_members?guild_code=eq.{urllib.parse.quote(guild)}")
+            except Exception:
+                pass
+            try:
+                supabase_request("DELETE", url, key, f"guilds?guild_code=eq.{urllib.parse.quote(guild)}")
+            except Exception:
+                pass
             return
         has_owner = any((m.get("role") or "").lower() == "owner" for m in members)
         if has_owner and not previous_owner_left:
@@ -3244,80 +2627,15 @@ class MainWindow(QMainWindow):
         if hasattr(self, "guild_role_label"):
             self.guild_role_label.setText("Role: member")
 
-    def _leave_remote_guild_membership(self, guild: str, display_name: str, current_role: str = "") -> None:
-        """Remove a user from a remote guild and cleanup/transfer ownership if needed.
-
-        This is used both by Leave Guild and when switching/creating a different guild.
-        It prevents orphan guild rows with zero members from blocking reuse of the same
-        guild name/code.
-        """
-        url, key = active_supabase()
-        guild = (guild or "").upper()
-        display_name = (display_name or "").strip()
-        if not url or not key or not guild or not display_name:
-            return
-        try:
-            supabase_request(
-                "DELETE",
-                url,
-                key,
-                f"guild_members?guild_code=eq.{urllib.parse.quote(guild)}&display_name=eq.{urllib.parse.quote(display_name)}",
-            )
-        except Exception:
-            # Continue to cleanup checks even if the member row was already gone.
-            pass
-        remaining_members = self._fetch_guild_members_remote(guild)
-        if not remaining_members:
-            self._delete_remote_guild_completely(guild)
-        else:
-            self._promote_next_owner_or_delete_guild(guild, previous_owner_left=((current_role or "").lower() == "owner"))
-
-    def _cleanup_empty_remote_guilds_matching(self, guild_name: str = "", guild_code: str = "") -> None:
-        """Delete empty guilds matching a name/code before create checks.
-
-        Supabase can retain a guild row after prior test builds if the local cache was
-        overwritten or the app was closed mid-leave. This makes create-guild idempotent:
-        empty matches are removed, non-empty matches still block duplicates.
-        """
-        url, key = active_supabase()
-        if not url or not key:
-            return
-        candidates: list[dict] = []
-        try:
-            if guild_name:
-                rows = supabase_request(
-                    "GET", url, key,
-                    f"guilds?guild_name=ilike.{urllib.parse.quote(guild_name)}&select=guild_code,guild_name",
-                )
-                if isinstance(rows, list):
-                    candidates.extend(rows)
-            if guild_code:
-                rows = supabase_request(
-                    "GET", url, key,
-                    f"guilds?guild_code=eq.{urllib.parse.quote(guild_code.upper())}&select=guild_code,guild_name",
-                )
-                if isinstance(rows, list):
-                    candidates.extend(rows)
-        except Exception:
-            return
-        seen = set()
-        for row in candidates:
-            code = (row.get("guild_code") or "").upper()
-            if not code or code in seen:
-                continue
-            seen.add(code)
-            if not self._fetch_guild_members_remote(code):
-                self._delete_remote_guild_completely(code)
-
     def leave_guild(self):
         guild = db.get_setting("guild_code", "").upper()
         display_name = db.get_setting("display_name", "")
         current_role = (db.get_setting("guild_role", "member") or "member").lower()
-        members_before = self._fetch_guild_members_remote(guild) if guild else []
-        if len(members_before) <= 1:
+        members = self._fetch_guild_members_remote(guild) if guild else []
+        if len(members) <= 1:
             msg = (
                 "You are the last member of this guild. Leaving will permanently delete the guild, "
-                "its POIs, bases, news, useful links, activity, and logo. Continue?"
+                "its POIs, bases, and logo. Continue?"
             )
         else:
             msg = "Leave this guild on this computer?"
@@ -3326,7 +2644,13 @@ class MainWindow(QMainWindow):
         url, key = active_supabase()
         if guild and display_name and url and key:
             try:
-                self._leave_remote_guild_membership(guild, display_name, current_role)
+                supabase_request(
+                    "DELETE",
+                    url,
+                    key,
+                    f"guild_members?guild_code=eq.{urllib.parse.quote(guild)}&display_name=eq.{urllib.parse.quote(display_name)}",
+                )
+                self._promote_next_owner_or_delete_guild(guild, previous_owner_left=(current_role == "owner"))
             except Exception as exc:
                 QMessageBox.warning(self, "Leave Guild", f"Remote leave had an issue, but local guild settings will be cleared.\n\n{exc}")
         if guild:
@@ -3365,70 +2689,30 @@ class MainWindow(QMainWindow):
         if not display_name:
             QMessageBox.information(self, "Guild", "Enter a display name first.")
             return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Create Guild")
-        dlg.setMinimumWidth(440)
-        dlg_layout = QVBoxLayout(dlg)
-        form = QFormLayout()
-        guild_name_input = QLineEdit()
-        guild_name_input.setPlaceholderText("Example: Griffin Wing")
-        guild_code_input = QLineEdit(make_guild_code())
-        guild_code_input.setPlaceholderText("Example: GRIFFIN-WING")
-        form.addRow("Guild Name", guild_name_input)
-        form.addRow("Guild Code", guild_code_input)
-        dlg_layout.addLayout(form)
-        btns = QHBoxLayout()
-        generate = QPushButton("Generate Code")
-        generate.clicked.connect(lambda: guild_code_input.setText(make_guild_code()))
-        cancel = QPushButton("Cancel")
-        cancel.clicked.connect(dlg.reject)
-        create = QPushButton("Create Guild")
-        create.setObjectName("PrimaryButton")
-        create.clicked.connect(dlg.accept)
-        btns.addWidget(generate)
-        btns.addStretch()
-        btns.addWidget(cancel)
-        btns.addWidget(create)
-        dlg_layout.addLayout(btns)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        guild_name = guild_name_input.text().strip()
-        guild_code = ''.join(ch for ch in guild_code_input.text().strip().upper() if ch.isalnum() or ch == '-')
+        guild_name, ok = QInputDialog.getText(self, "Create Guild", "Guild name:")
+        guild_name = guild_name.strip() if ok else ""
         if not guild_name:
-            QMessageBox.information(self, "Create Guild", "Guild name is required.")
             return
-        if not guild_code:
-            QMessageBox.information(self, "Create Guild", "Guild code is required.")
-            return
+        guild_code = make_guild_code()
         if not url or not key:
             QMessageBox.warning(self, "Create Guild Failed", "Connection is not configured for this build.")
             return
         try:
-            self._cleanup_empty_remote_guilds_matching(guild_name=guild_name, guild_code=guild_code)
             existing_name = supabase_request(
                 "GET",
                 url,
                 key,
-                f"guilds?guild_name=ilike.{urllib.parse.quote(guild_name)}&select=guild_code,guild_name",
+                f"guilds?guild_name=ilike.{urllib.parse.quote(guild_name)}&select=guild_code,guild_name&limit=1",
             )
-            for existing in list(existing_name or []):
-                existing_code_value = (existing.get("guild_code") or "").upper()
-                if not existing_code_value:
-                    continue
-                existing_members = self._fetch_guild_members_remote(existing_code_value)
-                if existing_members:
-                    QMessageBox.warning(self, "Guild Exists", "A guild with that name already exists. Choose another guild name.")
-                    return
-                # Cleanup empty/orphaned guild rows so the name can be reused.
-                self._delete_remote_guild_completely(existing_code_value)
-            existing_code = supabase_request("GET", url, key, f"guilds?guild_code=eq.{urllib.parse.quote(guild_code)}&select=guild_code&limit=1")
-            for existing in list(existing_code or []):
-                existing_code_value = (existing.get("guild_code") or "").upper()
-                existing_members = self._fetch_guild_members_remote(existing_code_value)
-                if existing_members:
-                    QMessageBox.warning(self, "Guild Code Exists", "A guild with that code already exists. Choose another guild code.")
-                    return
-                self._delete_remote_guild_completely(existing_code_value)
+            if existing_name:
+                QMessageBox.warning(self, "Guild Exists", "A guild with that name already exists. Choose another guild name.")
+                return
+            # Extremely unlikely, but avoid code collisions.
+            for _ in range(5):
+                existing_code = supabase_request("GET", url, key, f"guilds?guild_code=eq.{urllib.parse.quote(guild_code)}&select=guild_code&limit=1")
+                if not existing_code:
+                    break
+                guild_code = make_guild_code()
             supabase_request("POST", url, key, "guilds?on_conflict=guild_code", [{
                 "guild_code": guild_code,
                 "guild_name": guild_name,
@@ -3440,11 +2724,7 @@ class MainWindow(QMainWindow):
                 "role": "owner",
             }])
             old_guild = db.get_setting("guild_code", "").upper()
-            old_user = db.get_setting("display_name", "")
-            old_role = db.get_setting("guild_role", "member")
             if old_guild and old_guild != guild_code.upper():
-                # Creating a new guild acts like leaving the previous one first.
-                self._leave_remote_guild_membership(old_guild, old_user, old_role)
                 db.clear_local_guild_cache(old_guild)
             db.set_setting("guild_code", guild_code)
             db.set_setting("guild_name", guild_name)
@@ -3463,11 +2743,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Create Guild Failed", str(exc))
 
     def join_guild(self, show_success: bool = True):
-        old_guild = db.get_setting("guild_code", "").upper()
-        display_name = self.display_name.text().strip() if hasattr(self, "display_name") else db.get_setting("display_name", "")
-        guild = self.guild_code.text().strip().upper() if hasattr(self, "guild_code") else db.get_setting("guild_code", "").upper()
-        guild = ''.join(ch for ch in guild if ch.isalnum() or ch == '-')
+        self.save_sync_settings()
         url, key = active_supabase()
+        guild = db.get_setting("guild_code", "").upper()
+        display_name = db.get_setting("display_name", "")
         if not guild or not display_name:
             QMessageBox.information(self, "Guild", "Enter display name and guild code first.")
             return
@@ -3476,42 +2755,22 @@ class MainWindow(QMainWindow):
             if not found:
                 QMessageBox.warning(self, "Guild", "Guild code not found. Ask the guild owner to create it first.")
                 return
-            if old_guild and old_guild != guild:
-                old_user = db.get_setting("display_name", "")
-                old_role = db.get_setting("guild_role", "member")
-                self._leave_remote_guild_membership(old_guild, old_user, old_role)
-                db.clear_local_guild_cache(old_guild)
-            db.set_setting("display_name", display_name)
-            db.set_setting("guild_code", guild)
-            db.set_setting("guild_name", found[0].get("guild_name", ""))
-            existing_member = supabase_request(
-                "GET",
-                url,
-                key,
-                f"guild_members?guild_code=eq.{urllib.parse.quote(guild)}&display_name=eq.{urllib.parse.quote(display_name)}&select=role&limit=1",
-            )
-            role = (existing_member[0].get("role") if existing_member else "member") or "member"
             supabase_request("POST", url, key, "guild_members?on_conflict=guild_code,display_name", [{
                 "guild_code": guild,
                 "display_name": display_name,
-                "role": role,
+                "role": "member",
             }])
-            db.set_setting("guild_role", role)
-            if hasattr(self, "guild_code"):
-                self.guild_code.setText(guild)
-            if hasattr(self, "display_name"):
-                self.display_name.setText(display_name)
+            old_guild = db.get_setting("guild_code", "").upper()
+            if old_guild and old_guild != guild:
+                db.clear_local_guild_cache(old_guild)
+            db.set_setting("guild_name", found[0].get("guild_name", ""))
+            db.set_setting("guild_role", "member")
             if hasattr(self, "guild_role_label"):
-                self.guild_role_label.setText("Role: " + role)
+                self.guild_role_label.setText("Role: member")
             self.sync_guild_pois(show_popup=False)
-            self.sync_guild_bases(show_popup=False)
-            self.sync_guild_dashboard_content(show_errors=False)
             self.update_guild_button_visibility()
             self.refresh_guild_members()
             self.sync_guild_logo_from_remote()
-            self.refresh_pois()
-            self.refresh_bases()
-            self.refresh_guild_page()
             self.refresh_dashboard()
             if show_success:
                 QMessageBox.information(self, "Guild", f"Joined guild {guild}.")

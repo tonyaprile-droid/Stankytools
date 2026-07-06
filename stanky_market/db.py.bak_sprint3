@@ -468,35 +468,6 @@ def _ensure_runtime_columns(conn: sqlite3.Connection) -> None:
             value TEXT DEFAULT ''
         )
     """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS guild_news_cache (
-            remote_id TEXT PRIMARY KEY,
-            guild_code TEXT DEFAULT '',
-            title TEXT DEFAULT '',
-            body TEXT DEFAULT '',
-            created_by TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS guild_activity_cache (
-            remote_id TEXT PRIMARY KEY,
-            guild_code TEXT DEFAULT '',
-            message TEXT DEFAULT '',
-            actor TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS guild_links_cache (
-            remote_id TEXT PRIMARY KEY,
-            guild_code TEXT DEFAULT '',
-            title TEXT DEFAULT '',
-            url TEXT DEFAULT '',
-            created_by TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
     conn.commit()
 
 # Wrap original connect so new runtime columns/settings are always present.
@@ -829,15 +800,9 @@ def clear_local_guild_cache(guild_code: str = "") -> None:
         if guild:
             conn.execute("DELETE FROM deep_desert_pois WHERE UPPER(COALESCE(guild_code, ''))=?", (guild,))
             conn.execute("DELETE FROM guild_bases WHERE UPPER(COALESCE(guild_code, ''))=?", (guild,))
-            conn.execute("DELETE FROM guild_news_cache WHERE UPPER(COALESCE(guild_code, ''))=?", (guild,))
-            conn.execute("DELETE FROM guild_activity_cache WHERE UPPER(COALESCE(guild_code, ''))=?", (guild,))
-            conn.execute("DELETE FROM guild_links_cache WHERE UPPER(COALESCE(guild_code, ''))=?", (guild,))
         else:
             conn.execute("DELETE FROM deep_desert_pois")
             conn.execute("DELETE FROM guild_bases")
-            conn.execute("DELETE FROM guild_news_cache")
-            conn.execute("DELETE FROM guild_activity_cache")
-            conn.execute("DELETE FROM guild_links_cache")
         conn.commit()
     finally:
         conn.close()
@@ -850,120 +815,5 @@ def clear_orphan_guild_cache() -> None:
         conn.execute("DELETE FROM deep_desert_pois WHERE COALESCE(guild_code, '')='' ")
         conn.execute("DELETE FROM guild_bases WHERE COALESCE(guild_code, '')='' ")
         conn.commit()
-    finally:
-        conn.close()
-
-
-# Guild dashboard cache helpers
-
-def cache_guild_news(rows: list[dict], guild_code: str) -> None:
-    conn = connect()
-    try:
-        guild = (guild_code or "").strip().upper()
-        conn.execute("DELETE FROM guild_news_cache WHERE guild_code=?", (guild,))
-        for row in rows or []:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO guild_news_cache
-                (remote_id, guild_code, title, body, created_by, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(row.get("id", row.get("remote_id", ""))),
-                    guild,
-                    str(row.get("title", "")),
-                    str(row.get("body", row.get("message", ""))),
-                    str(row.get("created_by", row.get("actor", ""))),
-                    str(row.get("created_at", "")),
-                ),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def list_guild_news(guild_code: str = "", limit: int = 20) -> list[sqlite3.Row]:
-    conn = connect()
-    try:
-        guild = (guild_code or "").strip().upper()
-        return conn.execute(
-            "SELECT * FROM guild_news_cache WHERE guild_code=? ORDER BY created_at DESC LIMIT ?",
-            (guild, int(limit)),
-        ).fetchall()
-    finally:
-        conn.close()
-
-
-def cache_guild_activity(rows: list[dict], guild_code: str) -> None:
-    conn = connect()
-    try:
-        guild = (guild_code or "").strip().upper()
-        conn.execute("DELETE FROM guild_activity_cache WHERE guild_code=?", (guild,))
-        for row in rows or []:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO guild_activity_cache
-                (remote_id, guild_code, message, actor, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    str(row.get("id", row.get("remote_id", ""))),
-                    guild,
-                    str(row.get("message", row.get("body", ""))),
-                    str(row.get("actor", row.get("created_by", ""))),
-                    str(row.get("created_at", "")),
-                ),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def list_guild_activity(guild_code: str = "", limit: int = 30) -> list[sqlite3.Row]:
-    conn = connect()
-    try:
-        guild = (guild_code or "").strip().upper()
-        return conn.execute(
-            "SELECT * FROM guild_activity_cache WHERE guild_code=? ORDER BY created_at DESC LIMIT ?",
-            (guild, int(limit)),
-        ).fetchall()
-    finally:
-        conn.close()
-
-
-def cache_guild_links(rows: list[dict], guild_code: str) -> None:
-    conn = connect()
-    try:
-        guild = (guild_code or "").strip().upper()
-        conn.execute("DELETE FROM guild_links_cache WHERE guild_code=?", (guild,))
-        for row in rows or []:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO guild_links_cache
-                (remote_id, guild_code, title, url, created_by, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(row.get("id", row.get("remote_id", ""))),
-                    guild,
-                    str(row.get("title", "")),
-                    str(row.get("url", "")),
-                    str(row.get("created_by", "")),
-                    str(row.get("created_at", "")),
-                ),
-            )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def list_guild_links(guild_code: str = "", limit: int = 30) -> list[sqlite3.Row]:
-    conn = connect()
-    try:
-        guild = (guild_code or "").strip().upper()
-        return conn.execute(
-            "SELECT * FROM guild_links_cache WHERE guild_code=? ORDER BY title COLLATE NOCASE LIMIT ?",
-            (guild, int(limit)),
-        ).fetchall()
     finally:
         conn.close()
