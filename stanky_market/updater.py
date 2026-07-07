@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-APP_VERSION = "0.2.3"
+APP_VERSION = "1.0.0-foundation.6"
 GITHUB_OWNER = "tonyaprile-droid"
 GITHUB_REPO = "Stankytools"
 RELEASES_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases"

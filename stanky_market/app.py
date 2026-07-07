@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 import webbrowser
 from pathlib import Path
 from typing import Any
@@ -12,9 +13,16 @@ import random
 import string
 import base64
 import time
+import zipfile
+import tempfile
 
-from PySide6.QtCore import Qt, QSize, QTimer, QPointF, QThread, Signal, QUrl, QLoggingCategory, qInstallMessageHandler
-from PySide6.QtGui import QPixmap, QIcon, QPainter, QColor, QBrush, QPen, QFont, QWheelEvent, QAction
+try:
+    import shiboken6
+except Exception:
+    shiboken6 = None
+
+from PySide6.QtCore import Qt, QSize, QTimer, QPointF, QRectF, QThread, Signal, QUrl, QLoggingCategory, qInstallMessageHandler
+from PySide6.QtGui import QPixmap, QIcon, QPainter, QColor, QBrush, QPen, QFont, QWheelEvent, QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -52,15 +60,39 @@ from PySide6.QtWidgets import (
 
 from . import db, deep_desert, guild_config, updater
 from .paths import app_root, asset_dir, data_dir
+from .ui.theme import premium_qss
+from .ui.widgets.cards import CommandCard, StatusPill
+from .services.sync_manager import SyncManager
 
 try:
     from PySide6.QtWebEngineWidgets import QWebEngineView
-    from PySide6.QtWebEngineCore import QWebEnginePage
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineProfile
     WEBENGINE_AVAILABLE = True
 except Exception:
     QWebEngineView = None
     QWebEnginePage = None
+    QWebEngineProfile = None
     WEBENGINE_AVAILABLE = False
+
+try:
+    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+    from PySide6.QtMultimediaWidgets import QVideoWidget
+    MULTIMEDIA_AVAILABLE = True
+except Exception:
+    QMediaPlayer = None
+    QAudioOutput = None
+    QVideoWidget = None
+    MULTIMEDIA_AVAILABLE = False
+
+
+def qt_alive(widget) -> bool:
+    """Return False if a Python reference points to a Qt object already deleted by Qt."""
+    if widget is None:
+        return False
+    try:
+        return bool(shiboken6.isValid(widget)) if shiboken6 is not None else True
+    except Exception:
+        return False
 
 
 
@@ -101,6 +133,75 @@ def qss_path(path: Path) -> str:
     return path.resolve().as_posix()
 
 
+def local_cache_dir(*parts: str) -> Path:
+    """Return the user-writable StankyTools cache directory."""
+    base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "StankyTools"
+    target = base.joinpath(*parts)
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def ensure_easter_egg_video(parent: QWidget | None = None) -> Path | None:
+    """Get the Easter egg video from local cache, bundled fallback, or GitHub Releases."""
+    target = local_cache_dir("videos") / "pgmayo.mp4"
+    if target.exists() and target.stat().st_size > 0:
+        return target
+
+    bundled = asset_path("videos", "pgmayo.mp4")
+
+    progress = None
+    try:
+        progress = QProgressDialog("Downloading classified transmission from GitHub...", "Cancel", 0, 100, parent)
+        progress.setWindowTitle("StankyTools Assets")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        req = urllib.request.Request(
+            DEFAULT_EASTER_EGG_VIDEO_URL,
+            headers={"User-Agent": f"StankyTools/{updater.APP_VERSION}"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as response:
+            total = int(response.headers.get("Content-Length") or 0)
+            done = 0
+            with target.open("wb") as f:
+                while True:
+                    chunk = response.read(1024 * 128)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if total and progress:
+                        progress.setValue(min(99, int(done * 100 / total)))
+                        QApplication.processEvents()
+                        if progress.wasCanceled():
+                            raise RuntimeError("Download canceled")
+        if progress:
+            progress.setValue(100)
+        return target if target.exists() and target.stat().st_size > 0 else None
+    except Exception as exc:
+        try:
+            if target.exists() and target.stat().st_size == 0:
+                target.unlink(missing_ok=True)
+        except Exception:
+            pass
+        # Developer/source fallback so the Easter egg still works before the GitHub
+        # release asset has been uploaded. Release builds should use the cached
+        # GitHub copy after the first successful download.
+        if bundled.exists() and bundled.stat().st_size > 0:
+            try:
+                target.write_bytes(bundled.read_bytes())
+                return target
+            except Exception:
+                return bundled
+        if parent is not None:
+            QMessageBox.warning(
+                parent,
+                "Classified Transmission",
+                "The video asset could not be downloaded from GitHub.\n\n"
+                "Upload pgmayo.mp4 to your latest GitHub Release as a release asset named pgmayo.mp4.",
+            )
+        return None
+
+
 def format_app_date(value: str) -> str:
     """Format timestamps like 2026-07-06T12:34:56 as 7-6-2026."""
     raw = str(value or "").strip()
@@ -127,6 +228,9 @@ def resolve_local_path(value: str) -> Path:
 
 CATALOG_PIXMAP_CACHE: dict[tuple[str, int], QPixmap] = {}
 METHOD_DEEP_DESERT_URL = "https://www.method.gg/dune-awakening/deep-desert-companion"
+GAMING_TOOLS_DEEP_DESERT_URL = "https://dune.gaming.tools/deep-desert"
+DEFAULT_CATALOG_IMAGES_ZIP_URL = "https://github.com/tonyaprile-droid/Stankytools/releases/latest/download/catalog_images.zip"
+DEFAULT_EASTER_EGG_VIDEO_URL = "https://github.com/tonyaprile-droid/Stankytools/releases/latest/download/pgmayo.mp4"
 
 def catalog_image_pixmap(image_path: str, size: int = 64) -> QPixmap:
     """Return a square thumbnail pixmap for catalog rows, with a fallback placeholder.
@@ -253,23 +357,36 @@ QLabel#SectionTitle {{
     letter-spacing: 2px;
 }}
 QPushButton {{
-    background: #EA20170F;
-    border: 1px solid #5CD4AE63;
+    background: #F12A1F12;
+    border: 1px solid #8AD4AE63;
     border-radius: 12px;
-    padding: 10px 16px;
-    color: #f4dea9;
-    font-weight: 650;
+    padding: 11px 18px;
+    color: #fff0bf;
+    font-size: 15px;
+    font-weight: 800;
+    min-height: 22px;
 }}
 QPushButton:hover {{
-    background: #F4352512;
+    background: #FF372817;
     border: 1px solid #f0c76c;
+    color: #fff8df;
+}}
+QPushButton:pressed {{
+    background: #D4AE6330;
+    border: 1px solid #ffe0a1;
+}}
+QPushButton:disabled {{
+    background: #55110D08;
+    border: 1px solid #33D4AE63;
+    color: #8f7a54;
 }}
 QPushButton#PrimaryButton {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 #f4d27f, stop:1 #a96c28);
-    color: #160e08;
-    font-weight: 900;
-    border: 1px solid #ffe0a1;
+        stop:0 #ffe19a, stop:1 #c17b31);
+    color: #120b05;
+    font-size: 15px;
+    font-weight: 950;
+    border: 1px solid #fff0bf;
 }}
 QLineEdit, QComboBox, QSpinBox, QTextEdit {{
     background: #EA090807;
@@ -396,6 +513,189 @@ class StatCard(QFrame):
         layout.addStretch()
 
 
+class PremiumStatCard(QFrame):
+    def __init__(self, title: str, value: str = "—", hint: str = "", tone: str = "gold"):
+        super().__init__()
+        self.setObjectName("PremiumStatCard")
+        self.setMinimumHeight(132)
+        self.title_label = QLabel(title.upper())
+        self.title_label.setObjectName("CardTitle")
+        self.value_label = QLabel(value)
+        self.value_label.setObjectName("CardValue")
+        self.hint_label = QLabel(hint)
+        self.hint_label.setObjectName("CardHint")
+        self.hint_label.setWordWrap(True)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(6)
+        layout.addWidget(self.title_label)
+        layout.addStretch(1)
+        layout.addWidget(self.value_label)
+        layout.addWidget(self.hint_label)
+
+    def set_value(self, value: str, hint: str | None = None):
+        self.value_label.setText(value)
+        if hint is not None:
+            self.hint_label.setText(hint)
+
+
+class QuickActionCard(QFrame):
+    clicked = Signal()
+
+    def __init__(self, icon: str, title: str, subtitle: str = ""):
+        super().__init__()
+        self.setObjectName("QuickActionCard")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(108)
+        icon_label = QLabel(icon)
+        icon_label.setObjectName("ActionIcon")
+        icon_label.setAlignment(Qt.AlignCenter)
+        title_label = QLabel(title.upper())
+        title_label.setObjectName("ActionTitle")
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setObjectName("CardHint")
+        subtitle_label.setWordWrap(True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(14)
+        layout.addWidget(icon_label)
+        text = QVBoxLayout()
+        text.setSpacing(3)
+        text.addWidget(title_label)
+        text.addWidget(subtitle_label)
+        text.addStretch()
+        layout.addLayout(text, 1)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+class NewsCard(QFrame):
+    def __init__(self, title: str, body: str = "", poster: str = "—", date: str = ""):
+        super().__init__()
+        self.setObjectName("NewsCard")
+        self.setMinimumHeight(96)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(5)
+        top = QHBoxLayout()
+        title_label = QLabel((title or "Guild Update").upper())
+        title_label.setObjectName("NewsTitle")
+        date_label = QLabel(date or "")
+        date_label.setObjectName("MicroLabel")
+        top.addWidget(title_label, 1)
+        top.addWidget(date_label)
+        body_label = QLabel(body or "No details posted yet.")
+        body_label.setObjectName("NewsBody")
+        body_label.setWordWrap(True)
+        by_label = QLabel(f"POSTED BY {poster or '—'}")
+        by_label.setObjectName("MicroLabel")
+        layout.addLayout(top)
+        layout.addWidget(body_label)
+        layout.addWidget(by_label)
+
+
+class LinkCard(QFrame):
+    clicked = Signal(str)
+
+    def __init__(self, title: str, url: str = "", poster: str = "—"):
+        super().__init__()
+        self.url = str(url or "")
+        self.setObjectName("NewsCard")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMinimumHeight(82)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(5)
+        title_label = QLabel((title or "Useful Link").upper())
+        title_label.setObjectName("NewsTitle")
+        title_label.setWordWrap(True)
+        url_label = QLabel(self.url or "No URL")
+        url_label.setObjectName("NewsBody")
+        url_label.setWordWrap(True)
+        by_label = QLabel(f"ADDED BY {poster or '—'}")
+        by_label.setObjectName("MicroLabel")
+        layout.addWidget(title_label)
+        layout.addWidget(url_label)
+        layout.addWidget(by_label)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.url:
+            self.clicked.emit(self.url)
+        super().mousePressEvent(event)
+
+
+class MarketMoverCard(QFrame):
+    def __init__(self, name: str, value: str, trend: str, tone: str = "gold"):
+        super().__init__()
+        self.setObjectName("MarketMoverCard")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+        arrow = QLabel(trend)
+        arrow.setObjectName("ActionIcon")
+        name_label = QLabel(name)
+        name_label.setObjectName("NewsTitle")
+        value_label = QLabel(value)
+        value_label.setObjectName("CardHint")
+        text = QVBoxLayout()
+        text.addWidget(name_label)
+        text.addWidget(value_label)
+        layout.addWidget(arrow)
+        layout.addLayout(text, 1)
+
+
+
+class PriceHistoryGraph(QWidget):
+    """Small lightweight price-history graph for the auction terminal."""
+
+    def __init__(self):
+        super().__init__()
+        self.points: list[int] = []
+        self.setMinimumHeight(150)
+        self.setObjectName("PriceHistoryGraph")
+
+    def set_points(self, points: list[int]):
+        self.points = [int(p or 0) for p in points if p is not None]
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(16, 14, -16, -16)
+        painter.setPen(QPen(QColor("#2b2117"), 1))
+        painter.setBrush(QBrush(QColor("#100d09")))
+        painter.drawRoundedRect(rect, 14, 14)
+        for i in range(1, 4):
+            y = rect.top() + int(rect.height() * i / 4)
+            painter.setPen(QPen(QColor(214, 174, 90, 38), 1))
+            painter.drawLine(rect.left()+10, y, rect.right()-10, y)
+        if len(self.points) < 2:
+            painter.setPen(QPen(QColor("#8d6a2b"), 1))
+            painter.drawText(rect, Qt.AlignCenter, "Not enough price history yet")
+            return
+        values = list(reversed(self.points[-24:]))
+        lo, hi = min(values), max(values)
+        span = max(1, hi - lo)
+        step = rect.width() / max(1, len(values) - 1)
+        path_points = []
+        for idx, value in enumerate(values):
+            x = rect.left() + idx * step
+            y = rect.bottom() - ((value - lo) / span) * (rect.height() - 22) - 11
+            path_points.append(QPointF(x, y))
+        painter.setPen(QPen(QColor("#d6ae5a"), 3))
+        for a, b in zip(path_points, path_points[1:]):
+            painter.drawLine(a, b)
+        painter.setBrush(QBrush(QColor("#f5f3ed")))
+        painter.setPen(Qt.NoPen)
+        for pt in path_points[-4:]:
+            painter.drawEllipse(pt, 4, 4)
+        painter.setPen(QPen(QColor("#bda56d"), 1))
+        painter.drawText(rect.adjusted(12, 8, -12, -8), Qt.AlignTop | Qt.AlignLeft, f"High {fmt_price(hi)}")
+        painter.drawText(rect.adjusted(12, 8, -12, -8), Qt.AlignBottom | Qt.AlignLeft, f"Low {fmt_price(lo)}")
+
 class PriceDialog(QDialog):
     def __init__(self, parent: QWidget, item_id: int, item_name: str):
         super().__init__(parent)
@@ -451,6 +751,55 @@ class CatalogImportWorker(QThread):
             self.failed.emit(str(exc))
 
 
+class CatalogImagesGitHubWorker(QThread):
+    progress = Signal(str)
+    finished_ok = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, url: str = DEFAULT_CATALOG_IMAGES_ZIP_URL, parent=None):
+        super().__init__(parent)
+        self.url = url.strip() or DEFAULT_CATALOG_IMAGES_ZIP_URL
+
+    def run(self):
+        try:
+            target_dir = data_dir() / "catalog_images"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            self.progress.emit("Downloading catalog_images.zip from GitHub...")
+            req = urllib.request.Request(self.url, headers={"User-Agent": f"StankyTools/{updater.APP_VERSION}"})
+            with urllib.request.urlopen(req, timeout=45) as response:
+                payload = response.read()
+            if len(payload) < 1024:
+                raise RuntimeError("Downloaded file was too small to be a catalog image ZIP.")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+                tmp.write(payload)
+                tmp_path = Path(tmp.name)
+            imported = 0
+            self.progress.emit("Extracting catalog images...")
+            try:
+                with zipfile.ZipFile(tmp_path, "r") as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        name = Path(info.filename).name
+                        if not name:
+                            continue
+                        if Path(name).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+                            continue
+                        # Flatten to data/catalog_images to match existing database image_path values.
+                        out = target_dir / name
+                        with zf.open(info) as src, out.open("wb") as dst:
+                            dst.write(src.read())
+                        imported += 1
+            finally:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            self.finished_ok.emit({"images": imported, "folder": str(target_dir), "source": self.url})
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 
 
 class QuietWebEnginePage(QWebEnginePage if QWebEnginePage is not None else object):
@@ -482,194 +831,588 @@ class QuietWebEnginePage(QWebEnginePage if QWebEnginePage is not None else objec
             return
 
 
-class LiveDeepDesertView(QWidget):
-    """Embedded live Deep Desert companion map. Uses the Method.gg page directly so its filters remain intact."""
+
+
+class NativeDeepDesertCanvas(QWidget):
+    """Premium tactical Deep Desert map canvas with native overlays, zoom, pan, grid, and POI hover."""
+    coordinateChanged = Signal(str)
+    poiActionRequested = Signal(float, float, str)
+
+    # POI placement is normalized against the 881x883 Deep Desert grid background.
+    # Hidden filters/items removed on request: House Rep, PvP, Taxi, Intel, Loot,
+    # Spice Medium, and Spice Small.
+    POIS = [
+        ("shipwrecks", 75, 74, "Shipwreck"),
+        ("shipwrecks", 152, 319, "Shipwreck"),
+        ("shipwrecks", 792, 72, "Shipwreck"),
+        ("shipwrecks", 806, 318, "Shipwreck"),
+        ("caves", 126, 143, "Cave"),
+        ("caves", 515, 253, "Cave"),
+        ("caves", 80, 455, "Cave"),
+        ("caves", 446, 456, "Cave"),
+        ("caves", 638, 322, "Cave"),
+        ("caves", 118, 814, "Cave"),
+        ("caves", 270, 812, "Cave"),
+        ("caves", 451, 811, "Cave"),
+        ("caves", 530, 832, "Cave"),
+        ("caves", 814, 814, "Cave"),
+        ("testing_stations", 72, 458, "Testing Station"),
+        ("testing_stations", 446, 459, "Testing Station"),
+        ("testing_stations", 516, 329, "Testing Station"),
+        ("testing_stations", 641, 327, "Testing Station"),
+        ("testing_stations", 88, 817, "Testing Station"),
+        ("testing_stations", 170, 841, "Testing Station"),
+        ("testing_stations", 270, 840, "Testing Station"),
+        ("testing_stations", 504, 843, "Testing Station"),
+        ("testing_stations", 758, 812, "Testing Station"),
+        ("testing_stations", 836, 844, "Testing Station"),
+        ("large_spice_field", 125, 178, "Large Spice Field"),
+        ("large_spice_field", 185, 178, "Large Spice Field"),
+        ("large_spice_field", 248, 174, "Large Spice Field"),
+        ("large_spice_field", 500, 184, "Large Spice Field"),
+        ("large_spice_field", 750, 174, "Large Spice Field"),
+        ("large_spice_field", 560, 362, "Large Spice Field"),
+        ("large_spice_field", 748, 466, "Large Spice Field"),
+        ("large_spice_field", 815, 458, "Large Spice Field"),
+        ("large_spice_field", 95, 565, "Large Spice Field"),
+        ("large_spice_field", 276, 560, "Large Spice Field"),
+        ("large_spice_field", 480, 565, "Large Spice Field"),
+        ("large_spice_field", 520, 590, "Large Spice Field"),
+        ("large_spice_field", 560, 602, "Large Spice Field"),
+        ("large_spice_field", 750, 562, "Large Spice Field"),
+        ("large_spice_field", 806, 562, "Large Spice Field"),
+        ("titanium", 95, 803, "Titanium"),
+        ("titanium", 503, 804, "Titanium"),
+        ("titanium", 774, 804, "Titanium"),
+        ("stravidium", 105, 826, "Stravidium"),
+        ("stravidium", 500, 805, "Stravidium"),
+        ("stravidium", 766, 804, "Stravidium"),
+    ]
+    COLORS = {
+        "shipwrecks": QColor("#9c5ac6"),
+        "caves": QColor("#1591cf"),
+        "large_spice_field": QColor("#ff8a22"),
+        "testing_stations": QColor("#31588f"),
+        "titanium": QColor("#cbb36a"),
+        "stravidium": QColor("#76b747"),
+    }
+    ICON_FILES = {
+        "shipwrecks": "shipwreck.png",
+        "caves": "cave.png",
+        "large_spice_field": "large-spice-field.png",
+        "testing_stations": "testing-station.png",
+        "titanium": "titanium.png",
+        "stravidium": "stravidium.png",
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.background = QPixmap(str(data_dir() / "deep_desert_map.png"))
+        icon_root = data_dir() / "deep_desert" / "icons"
+        self.icon_pixmaps = {key: QPixmap(str(icon_root / filename)) for key, filename in self.ICON_FILES.items()}
+        self.enabled_filters: dict[str, bool] = {}
+        self.custom_pois = []
+        self.selected_custom_poi_id = None
+        self.hover_text = ""
+        self.hover_coord = ""
+        self.zoom_factor = float(db.get_setting("deep_desert_zoom", "1.0") or "1.0")
+        self.pan = QPointF(0, 0)
+        self._dragging = False
+        self._last_drag = QPointF(0, 0)
+        self.setMouseTracking(True)
+        self.setMinimumHeight(620)
+        self.setContextMenuPolicy(Qt.DefaultContextMenu)
+        self.setStyleSheet("background:#090806; border:1px solid #4a3518; border-radius:16px;")
+
+    def set_filters(self, filters: dict[str, bool]):
+        self.enabled_filters = dict(filters)
+        self.update()
+
+    def zoom_in(self):
+        self.set_zoom(self.zoom_factor * 1.18)
+
+    def zoom_out(self):
+        self.set_zoom(self.zoom_factor / 1.18)
+
+    def reset_view(self):
+        self.zoom_factor = 1.0
+        self.pan = QPointF(0, 0)
+        db.set_setting("deep_desert_zoom", "1.0")
+        self.update()
+
+    def set_zoom(self, value: float):
+        self.zoom_factor = max(1.0, min(3.75, float(value)))
+        db.set_setting("deep_desert_zoom", f"{self.zoom_factor:.2f}")
+        self._clamp_pan()
+        self.update()
+
+    def jump_to(self, x: float, y: float):
+        base = self._base_map_rect()
+        scaled = QRectF(
+            base.center().x() - base.width() * self.zoom_factor / 2,
+            base.center().y() - base.height() * self.zoom_factor / 2,
+            base.width() * self.zoom_factor,
+            base.height() * self.zoom_factor,
+        )
+        target_x = scaled.x() + (x / 881.0) * scaled.width()
+        target_y = scaled.y() + (y / 883.0) * scaled.height()
+        self.pan = QPointF(self.width() / 2 - target_x, self.height() / 2 - target_y)
+        self._clamp_pan()
+        self.update()
+
+    def _base_map_rect(self) -> QRectF:
+        pad = 8
+        available = QRectF(pad, pad, self.width() - pad * 2, self.height() - pad * 2)
+        if self.background.isNull():
+            return available
+        src_ratio = self.background.width() / max(1, self.background.height())
+        dst_ratio = available.width() / max(1, available.height())
+        if dst_ratio > src_ratio:
+            h = available.height()
+            w = h * src_ratio
+        else:
+            w = available.width()
+            h = w / src_ratio
+        return QRectF(available.x() + (available.width() - w) / 2, available.y() + (available.height() - h) / 2, w, h)
+
+    def _map_rect(self) -> QRectF:
+        base = self._base_map_rect()
+        w = base.width() * self.zoom_factor
+        h = base.height() * self.zoom_factor
+        return QRectF(base.center().x() - w / 2 + self.pan.x(), base.center().y() - h / 2 + self.pan.y(), w, h)
+
+    def _clamp_pan(self):
+        if self.zoom_factor <= 1.01:
+            self.pan = QPointF(0, 0)
+            return
+        base = self._base_map_rect()
+        max_x = max(0, (base.width() * self.zoom_factor - base.width()) / 2)
+        max_y = max(0, (base.height() * self.zoom_factor - base.height()) / 2)
+        self.pan = QPointF(max(-max_x, min(max_x, self.pan.x())), max(-max_y, min(max_y, self.pan.y())))
+
+    def _screen_point(self, x: float, y: float):
+        r = self._map_rect()
+        return r.x() + (x / 881.0) * r.width(), r.y() + (y / 883.0) * r.height()
+
+    def _map_coord_from_screen(self, px: float, py: float):
+        r = self._map_rect()
+        if r.width() <= 0 or r.height() <= 0:
+            return None
+        x = ((px - r.x()) / r.width()) * 881.0
+        y = ((py - r.y()) / r.height()) * 883.0
+        if 0 <= x <= 881 and 0 <= y <= 883:
+            return x, y
+        return None
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#070604"))
+        r = self._map_rect()
+        if not self.background.isNull():
+            painter.drawPixmap(r, self.background, QRectF(0, 0, self.background.width(), self.background.height()))
+        else:
+            painter.setPen(QPen(QColor("#87633a"), 2))
+            painter.drawText(r, Qt.AlignCenter, "Deep Desert background missing")
+
+        self._draw_coordinate_grid(painter, r)
+        self._draw_map_frame(painter, r)
+
+        visible_count = 0
+        for category, x, y, label in self.POIS:
+            if not self.enabled_filters.get(category, True):
+                continue
+            sx, sy = self._screen_point(x, y)
+            if -60 <= sx <= self.width() + 60 and -60 <= sy <= self.height() + 60:
+                self._draw_marker(painter, sx, sy, category, label)
+                visible_count += 1
+
+        for poi in self.custom_pois:
+            try:
+                x, y = float(poi["x"]), float(poi["y"])
+                label = poi["poi_type"] if "poi_type" in poi.keys() else "Guild POI"
+                note = poi["note"] if "note" in poi.keys() else ""
+                poi_id = int(poi["id"]) if "id" in poi.keys() else None
+            except Exception:
+                continue
+            sx, sy = self._screen_point(x, y)
+            if -80 <= sx <= self.width() + 80 and -80 <= sy <= self.height() + 80:
+                self._draw_custom_marker(painter, sx, sy, str(label), str(note), poi_id == self.selected_custom_poi_id)
+                visible_count += 1
+
+        self._draw_status_overlay(painter, visible_count)
+        if self.hover_text:
+            self._draw_hover_box(painter)
+
+    def _draw_coordinate_grid(self, painter: QPainter, r: QRectF):
+        painter.save()
+        painter.setClipRect(r)
+        painter.setPen(QPen(QColor(214, 174, 90, 42), 1))
+        steps = 8
+        for i in range(1, steps):
+            x = r.x() + r.width() * i / steps
+            y = r.y() + r.height() * i / steps
+            painter.drawLine(QPointF(x, r.y()), QPointF(x, r.bottom()))
+            painter.drawLine(QPointF(r.x(), y), QPointF(r.right(), y))
+        painter.setPen(QPen(QColor(245, 243, 237, 88), 1))
+        font = painter.font(); font.setPointSize(8); font.setBold(True); painter.setFont(font)
+        for i in range(steps):
+            painter.drawText(QRectF(r.x() + r.width() * i / steps + 6, r.y() + 6, 44, 20), Qt.AlignLeft, chr(65 + i))
+            painter.drawText(QRectF(r.x() + 6, r.y() + r.height() * i / steps + 6, 44, 20), Qt.AlignLeft, str(i + 1))
+        painter.restore()
+
+    def _draw_map_frame(self, painter: QPainter, r: QRectF):
+        painter.save()
+        painter.setPen(QPen(QColor(0, 0, 0, 155), 5))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(r, 16, 16)
+        painter.setPen(QPen(QColor(214, 174, 90, 112), 1.5))
+        painter.drawRoundedRect(r.adjusted(2, 2, -2, -2), 14, 14)
+        painter.restore()
+
+    def _draw_marker(self, painter: QPainter, sx: float, sy: float, category: str, label: str):
+        pix = self.icon_pixmaps.get(category)
+        size = 42 if category in {"shipwrecks", "titanium", "stravidium"} else 38
+        if self.zoom_factor > 2.1:
+            size += 4
+        rect = QRectF(sx - size / 2, sy - size / 2, size, size)
+        painter.save()
+        color = self.COLORS.get(category, QColor("#f7d27a"))
+        painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 72), 8))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(rect.adjusted(-2, -2, 2, 2))
+        if pix is not None and not pix.isNull():
+            painter.drawPixmap(rect, pix, QRectF(0, 0, pix.width(), pix.height()))
+        else:
+            painter.setPen(QPen(QColor(0, 0, 0, 190), 5))
+            painter.setBrush(QBrush(color))
+            painter.drawEllipse(rect)
+            painter.setPen(QPen(QColor("#fff2c2"), 1.2))
+            painter.drawEllipse(rect)
+        painter.restore()
+
+    def _draw_custom_marker(self, painter: QPainter, sx: float, sy: float, label: str, note: str = "", selected: bool = False):
+        painter.save()
+        color = QColor("#d6ae5a") if not selected else QColor("#8ee26b")
+        size = 30 if not selected else 38
+        rect = QRectF(sx - size / 2, sy - size / 2, size, size)
+        painter.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 95), 8))
+        painter.setBrush(QColor(9, 9, 9, 210))
+        painter.drawEllipse(rect.adjusted(-2, -2, 2, 2))
+        painter.setPen(QPen(color, 2))
+        painter.drawEllipse(rect)
+        painter.setPen(QColor("#f5f3ed"))
+        font = painter.font(); font.setPointSize(10); font.setBold(True); painter.setFont(font)
+        painter.drawText(rect, Qt.AlignCenter, "◆")
+        if self.zoom_factor >= 1.35 or selected:
+            text = label[:28]
+            label_rect = QRectF(sx + size / 2 + 6, sy - 13, max(110, len(text) * 7 + 22), 27)
+            painter.setPen(QPen(QColor(214, 174, 90, 82), 1))
+            painter.setBrush(QColor(9, 9, 9, 210))
+            painter.drawRoundedRect(label_rect, 8, 8)
+            painter.setPen(QColor("#f5f3ed"))
+            painter.drawText(label_rect.adjusted(10, 0, -8, 0), Qt.AlignVCenter | Qt.AlignLeft, text)
+        painter.restore()
+
+    def draw_pois(self, pois, selected_poi_id: int | None = None):
+        self.custom_pois = list(pois or [])
+        self.selected_custom_poi_id = selected_poi_id
+        self.update()
+
+    def center_on(self, x: float, y: float):
+        self.jump_to(float(x), float(y))
+
+    def mouseDoubleClickEvent(self, event):
+        coord = self._map_coord_from_screen(event.pos().x(), event.pos().y())
+        if coord:
+            self.poiActionRequested.emit(coord[0], coord[1], "guild")
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def _draw_compass(self, painter: QPainter):
+        painter.save()
+        box = QRectF(self.width() - 96, 18, 72, 72)
+        painter.setPen(QPen(QColor(214, 174, 90, 110), 1.2))
+        painter.setBrush(QColor(9, 9, 9, 178))
+        painter.drawEllipse(box)
+        cx, cy = box.center().x(), box.center().y()
+        painter.setPen(QPen(QColor("#f5f3ed"), 2))
+        painter.drawLine(QPointF(cx, cy + 20), QPointF(cx, cy - 22))
+        painter.setBrush(QColor("#d6ae5a"))
+        painter.drawPolygon([QPointF(cx, cy - 29), QPointF(cx - 7, cy - 12), QPointF(cx + 7, cy - 12)])
+        font = painter.font(); font.setPointSize(10); font.setBold(True); painter.setFont(font)
+        painter.setPen(QColor("#d6ae5a"))
+        painter.drawText(QRectF(cx - 10, cy - 13, 20, 20), Qt.AlignCenter, "N")
+        painter.restore()
+
+    def _draw_status_overlay(self, painter: QPainter, visible_count: int):
+        painter.save()
+        box = QRectF(18, 18, 248, 64)
+        painter.setPen(QPen(QColor(214, 174, 90, 92), 1))
+        painter.setBrush(QColor(9, 9, 9, 178))
+        painter.drawRoundedRect(box, 12, 12)
+        font = painter.font(); font.setPointSize(9); font.setBold(True); painter.setFont(font)
+        painter.setPen(QColor("#d6ae5a"))
+        painter.drawText(QRectF(box.x()+14, box.y()+10, box.width()-28, 18), Qt.AlignLeft, "TACTICAL OVERLAY")
+        painter.setPen(QColor("#f5f3ed"))
+        painter.drawText(QRectF(box.x()+14, box.y()+34, box.width()-28, 18), Qt.AlignLeft, f"{visible_count} markers visible  •  {int(self.zoom_factor*100)}% zoom")
+        painter.restore()
+
+    def _draw_hover_box(self, painter: QPainter):
+        painter.save()
+        text = self.hover_text + (f"  {self.hover_coord}" if self.hover_coord else "")
+        painter.setPen(QColor("#f7d27a"))
+        painter.setBrush(QColor(12, 10, 7, 226))
+        font = painter.font(); font.setPointSize(10); font.setBold(True); painter.setFont(font)
+        w = max(210, len(text) * 7 + 34)
+        box = QRectF(18, self.height() - 46, w, 30)
+        painter.drawRoundedRect(box, 9, 9)
+        painter.drawText(box, Qt.AlignCenter, text)
+        painter.restore()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            pos = event.position() if hasattr(event, "position") else event.pos()
+            self._last_drag = QPointF(pos.x(), pos.y())
+            self.setCursor(Qt.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._dragging = False
+            self.setCursor(Qt.ArrowCursor)
+        super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event):
+        pos = event.position() if hasattr(event, "position") else event.pos()
+        if self._dragging:
+            delta = QPointF(pos.x() - self._last_drag.x(), pos.y() - self._last_drag.y())
+            self.pan += delta
+            self._last_drag = QPointF(pos.x(), pos.y())
+            self._clamp_pan()
+            self.update()
+            return
+
+        coord = self._map_coord_from_screen(pos.x(), pos.y())
+        coord_text = ""
+        if coord:
+            coord_text = f"X {int(coord[0]):03d}  Y {int(coord[1]):03d}"
+            self.coordinateChanged.emit(coord_text)
+        best = ""
+        best_dist = 9999
+        for category, x, y, label in self.POIS:
+            if not self.enabled_filters.get(category, True):
+                continue
+            sx, sy = self._screen_point(x, y)
+            dist = ((pos.x() - sx) ** 2 + (pos.y() - sy) ** 2) ** 0.5
+            if dist < best_dist and dist < 24:
+                best_dist = dist
+                best = label
+        for poi in self.custom_pois:
+            try:
+                sx, sy = self._screen_point(float(poi["x"]), float(poi["y"]))
+                label = poi["poi_type"] if "poi_type" in poi.keys() else "Guild POI"
+            except Exception:
+                continue
+            dist = ((pos.x() - sx) ** 2 + (pos.y() - sy) ** 2) ** 0.5
+            if dist < best_dist and dist < 26:
+                best_dist = dist
+                best = str(label)
+        if best != self.hover_text or coord_text != self.hover_coord:
+            self.hover_text = best
+            self.hover_coord = coord_text if best else ""
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def wheelEvent(self, event: QWheelEvent):
+        old = self.zoom_factor
+        delta = event.angleDelta().y()
+        if delta > 0:
+            self.zoom_factor = min(3.75, self.zoom_factor * 1.14)
+        else:
+            self.zoom_factor = max(1.0, self.zoom_factor / 1.14)
+        if abs(self.zoom_factor - old) > 0.001:
+            self._clamp_pan()
+            db.set_setting("deep_desert_zoom", f"{self.zoom_factor:.2f}")
+            self.update()
+        event.accept()
+
+    def contextMenuEvent(self, event):
+        coord = self._map_coord_from_screen(event.pos().x(), event.pos().y())
+        if not coord:
+            return
+        menu = QMenu(self)
+        add_personal = menu.addAction("Add personal marker here")
+        add_guild = menu.addAction("Add guild POI here")
+        copy_coord = menu.addAction("Copy coordinate")
+        chosen = menu.exec(event.globalPos())
+        if chosen == copy_coord:
+            QApplication.clipboard().setText(f"{int(coord[0])},{int(coord[1])}")
+        elif chosen == add_personal:
+            self.poiActionRequested.emit(coord[0], coord[1], "personal")
+        elif chosen == add_guild:
+            self.poiActionRequested.emit(coord[0], coord[1], "guild")
+
+
+class LiveDeepDesertView(QWidget):
+    """Deep Desert Tactical Command Center built as native StankyTools UI."""
+    FILTERS = [
+        ("shipwrecks", "Shipwrecks"),
+        ("caves", "Caves"),
+        ("testing_stations", "Testing Stations"),
+        ("large_spice_field", "Large Spice Field"),
+        ("titanium", "Titanium"),
+        ("stravidium", "Stravidium"),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._reset_target_text = "—"
+        self.add_poi_callback = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        toolbar = QHBoxLayout()
-        label = QLabel("Live Deep Desert Map")
-        label.setObjectName("SectionTitle")
-        refresh = QPushButton("Refresh Live Map")
-        open_browser = QPushButton("Open in Browser")
-        refresh.clicked.connect(self.reload)
-        open_browser.clicked.connect(lambda: webbrowser.open(METHOD_DEEP_DESERT_URL))
-        toolbar.addWidget(label)
-        toolbar.addStretch()
-        toolbar.addWidget(refresh)
-        toolbar.addWidget(open_browser)
-        layout.addLayout(toolbar)
+        layout.setSpacing(12)
 
-        filters_panel = QFrame()
-        filters_panel.setObjectName("Panel")
-        filters_layout = QHBoxLayout(filters_panel)
-        filters_layout.setContentsMargins(12, 8, 12, 8)
-        filters_layout.setSpacing(10)
-        filters_label = QLabel("Saved Filters:")
-        filters_label.setStyleSheet("color:#d4ae63; font-weight:700;")
-        filters_layout.addWidget(filters_label)
-        self.filter_checks = []
-        for name in ["Resources", "POIs", "Bases", "Caves", "Wrecks", "Merchants", "Enemy", "Friendly"]:
+        hero = QFrame()
+        hero.setObjectName("Panel")
+        hero.setMaximumHeight(86)
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(20, 14, 20, 14)
+        title_box = QVBoxLayout()
+        title = QLabel("DEEP DESERT MAP")
+        title.setObjectName("SectionTitle")
+        subtitle = QLabel("Drag to move • scroll to zoom • double-click anywhere to add a guild POI")
+        subtitle.setWordWrap(True)
+        subtitle.setStyleSheet("color:#d8c098; font-size:13px; font-weight:700;")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        hero_layout.addLayout(title_box, 1)
+        self.coordinate_label = StatusPill("Cursor", "—")
+        self.reset_label = StatusPill("Reset", "—")
+        self.sync_label = StatusPill("Sync", "Native")
+        hero_layout.addWidget(self.coordinate_label)
+        hero_layout.addWidget(self.reset_label)
+        hero_layout.addWidget(self.sync_label)
+        layout.addWidget(hero)
+
+        body = QHBoxLayout()
+        body.setSpacing(12)
+        self.canvas = NativeDeepDesertCanvas()
+        self.canvas.coordinateChanged.connect(lambda text: self.coordinate_label.value.setText(text))
+        self.canvas.poiActionRequested.connect(self._poi_action_requested)
+        body.addWidget(self.canvas, 1)
+
+        panel = QFrame()
+        panel.setObjectName("Panel")
+        panel.setMaximumWidth(214)
+        panel.setMinimumWidth(190)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(14, 14, 14, 14)
+        panel_layout.setSpacing(10)
+
+        head = QLabel("FILTERS")
+        head.setStyleSheet("color:#d6ae5a; font-size:13px; font-weight:950; letter-spacing:2px;")
+        panel_layout.addWidget(head)
+        self.filter_checks: list[QCheckBox] = []
+        for key, name in self.FILTERS:
             cb = QCheckBox(name)
-            cb.setChecked(db.get_setting("deep_filter_" + name.lower(), "1") == "1")
-            cb.toggled.connect(lambda checked, n=name: db.set_setting("deep_filter_" + n.lower(), "1" if checked else "0"))
+            cb.setChecked(db.get_setting("deep_filter_" + key, "1") == "1")
+            cb.setStyleSheet("QCheckBox{font-size:11px; font-weight:800; color:#d8c098; spacing:6px; padding:3px 2px;} QCheckBox::indicator{width:13px;height:13px;}")
+            cb.toggled.connect(lambda checked, k=key: self._filter_changed(k, checked))
             self.filter_checks.append(cb)
-            filters_layout.addWidget(cb)
-        filters_layout.addStretch()
-        layout.addWidget(filters_panel)
+            panel_layout.addWidget(cb)
 
-        if WEBENGINE_AVAILABLE and QWebEngineView is not None:
-            self.web = QWebEngineView(self)
-            if QWebEnginePage is not None:
-                self.web.setPage(QuietWebEnginePage(self.web))
-            self.web.loadFinished.connect(self._focus_method_map)
-            self.web.setUrl(QUrl(METHOD_DEEP_DESERT_URL))
-            layout.addWidget(self.web, 1)
+        row = QHBoxLayout()
+        all_btn = QPushButton("All")
+        clear_btn = QPushButton("Clear")
+        all_btn.clicked.connect(lambda: self._set_all_filters(True))
+        clear_btn.clicked.connect(lambda: self._set_all_filters(False))
+        row.addWidget(all_btn)
+        row.addWidget(clear_btn)
+        panel_layout.addLayout(row)
+
+        self.active_label = QLabel()
+        self.active_label.setWordWrap(True)
+        self.active_label.setStyleSheet("color:#fff0bf; font-size:12px; font-weight:850; margin-top:8px;")
+        panel_layout.addWidget(self.active_label)
+        note = QLabel("Double-click on the map to add a POI. Right-click to copy coordinates.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#9f8150; font-size:11px; font-weight:700;")
+        panel_layout.addWidget(note)
+        panel_layout.addStretch()
+        body.addWidget(panel)
+        layout.addLayout(body, 1)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._update_reset_countdown)
+        self._timer.start(60000)
+        self._update_active_label()
+        self._sync_canvas_filters()
+        self._update_reset_countdown()
+
+    def _set_all_filters(self, checked: bool):
+        for cb in self.filter_checks:
+            cb.setChecked(checked)
+        self._update_active_label()
+        self._sync_canvas_filters()
+
+    def _filter_changed(self, key: str, checked: bool):
+        db.set_setting("deep_filter_" + key, "1" if checked else "0")
+        self._update_active_label()
+        self._sync_canvas_filters()
+
+    def _filter_state(self) -> dict[str, bool]:
+        return {key: cb.isChecked() for (key, _), cb in zip(self.FILTERS, self.filter_checks)}
+
+    def _sync_canvas_filters(self):
+        self.canvas.set_filters(self._filter_state())
+
+    def _update_active_label(self):
+        active = [name for (_, name), cb in zip(self.FILTERS, self.filter_checks) if cb.isChecked()]
+        if not active:
+            text = "Active: None"
+        elif len(active) == len(self.filter_checks):
+            text = "Active: All tactical layers"
         else:
-            self.web = None
-            fallback = QFrame()
-            fallback.setObjectName("Panel")
-            box = QVBoxLayout(fallback)
-            msg = QLabel("The embedded browser component is not available in this build.\nUse Open in Browser, or install/build with PySide6 QtWebEngine support.")
-            msg.setWordWrap(True)
-            msg.setAlignment(Qt.AlignCenter)
-            box.addStretch()
-            box.addWidget(msg)
-            box.addWidget(open_browser, alignment=Qt.AlignCenter)
-            box.addStretch()
-            layout.addWidget(fallback, 1)
+            text = "Active: " + " • ".join(active)
+        self.active_label.setText(text)
 
-    def _focus_method_map(self, ok: bool = True):
-        """Crop Method.gg to the useful Deep Desert grid + Map Filters area."""
-        if not ok or self.web is None:
-            return
-        js = r"""
-(function focusMethodDeepDesert(){
-  const STYLE_ID = 'stankytools-focused-map-style';
-  function addStyle(){
-    if (document.getElementById(STYLE_ID)) return;
-    const style = document.createElement('style');
-    style.id = STYLE_ID;
-    style.textContent = `
-      html, body {
-        margin: 0 !important;
-        padding: 0 !important;
-        background: #1b1b1b !important;
-        overflow: hidden !important;
-        width: 100% !important;
-        height: 100% !important;
-      }
-      #stankytools-map-stage {
-        position: fixed !important;
-        inset: 0 !important;
-        z-index: 2147483647 !important;
-        background: #1b1b1b !important;
-        overflow: auto !important;
-        padding: 0 0 14px 0 !important;
-        display: flex !important;
-        flex-direction: column !important;
-        align-items: flex-start !important;
-      }
-      #stankytools-map-stage * { box-sizing: border-box !important; }
-      #stankytools-map-stage img,
-      #stankytools-map-stage canvas,
-      #stankytools-map-stage svg { max-width: none !important; }
-      header, footer, nav, aside,
-      [role='banner'], [role='navigation'],
-      .ad, .ads, .advertisement, .cookie, .cookie-banner,
-      [id*='ad-'], [class*='ad-'], [class*='advert'],
-      iframe[src*='googlesyndication'], iframe[src*='doubleclick'] {
-        display: none !important;
-        visibility: hidden !important;
-      }`;
-    document.head.appendChild(style);
-  }
-  function visible(el){
-    if (!el || el.nodeType !== 1) return false;
-    const r = el.getBoundingClientRect();
-    const st = getComputedStyle(el);
-    return r.width > 40 && r.height > 20 && st.display !== 'none' && st.visibility !== 'hidden';
-  }
-  function findTextNode(text){
-    const wanted = text.toLowerCase();
-    const nodes = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,div,span,p,strong,b'));
-    return nodes.find(el => visible(el) && (el.innerText || '').trim().toLowerCase().includes(wanted));
-  }
-  function bestMapElement(beforeY){
-    const candidates = Array.from(document.querySelectorAll('canvas,svg,img,div'));
-    let best = null;
-    let bestScore = 0;
-    for (const el of candidates){
-      if (!visible(el)) continue;
-      const r = el.getBoundingClientRect();
-      if (beforeY && r.top > beforeY + 90) continue;
-      const text = (el.innerText || '').toLowerCase();
-      const hasGridLabels = /\b(a|b|c|d|e|f|g|h|i)\b/.test(text) && /\b1\b/.test(text) && /\b9\b/.test(text);
-      const score = (r.width * r.height) + (hasGridLabels ? 900000 : 0);
-      if (r.width >= 450 && r.height >= 300 && score > bestScore){
-        best = el;
-        bestScore = score;
-      }
-    }
-    return best;
-  }
-  function usefulAncestor(el, minW, minH){
-    let cur = el;
-    let best = el;
-    while (cur && cur !== document.body){
-      const r = cur.getBoundingClientRect();
-      if (r.width >= minW && r.height >= minH && r.width < window.innerWidth * 1.8){
-        best = cur;
-      }
-      cur = cur.parentElement;
-    }
-    return best;
-  }
-  function focus(){
-    addStyle();
-    const filtersText = findTextNode('MAP FILTERS');
-    const beforeY = filtersText ? filtersText.getBoundingClientRect().top : 99999;
-    const mapNode = bestMapElement(beforeY);
-    if (!mapNode) return false;
-    const mapBlock = usefulAncestor(mapNode, 500, 320);
-    const filtersBlock = filtersText ? usefulAncestor(filtersText, 300, 50) : null;
-    let stage = document.getElementById('stankytools-map-stage');
-    if (!stage){
-      stage = document.createElement('div');
-      stage.id = 'stankytools-map-stage';
-      document.body.appendChild(stage);
-    }
-    stage.innerHTML = '';
-    mapBlock.style.margin = '0';
-    mapBlock.style.transformOrigin = 'top left';
-    mapBlock.style.maxWidth = 'none';
-    mapBlock.style.width = 'fit-content';
-    stage.appendChild(mapBlock);
-    if (filtersBlock && filtersBlock !== mapBlock && !mapBlock.contains(filtersBlock)){
-      filtersBlock.style.margin = '10px 0 0 10px';
-      filtersBlock.style.maxWidth = 'none';
-      filtersBlock.style.width = 'fit-content';
-      stage.appendChild(filtersBlock);
-    }
-    window.scrollTo(0,0);
-    return true;
-  }
-  let tries = 0;
-  const timer = setInterval(() => {
-    tries += 1;
-    if (focus() || tries > 20) clearInterval(timer);
-  }, 500);
-})();
-"""
-        self.web.page().runJavaScript(js)
+    def _jump_to_coord(self):
+        raw = self.coord_input.text().replace(" ", "")
+        try:
+            x_s, y_s = raw.split(",", 1)
+            x = max(0, min(881, float(x_s)))
+            y = max(0, min(883, float(y_s)))
+            self.canvas.jump_to(x, y)
+            self.coordinate_label.value.setText(f"X {int(x):03d}  Y {int(y):03d}")
+        except Exception:
+            QMessageBox.information(self, "Deep Desert", "Enter coordinates like 440,520")
+
+    def _poi_action_requested(self, x: float, y: float, scope: str):
+        QMessageBox.information(self, "Deep Desert", f"{scope.title()} marker tool selected at X {int(x)}, Y {int(y)}.\nThis is wired for the next guild marker editor sprint.")
+
+    def _update_reset_countdown(self):
+        try:
+            meta = deep_desert.load_meta()
+            nxt = str(meta.get("next_update", ""))
+            if nxt:
+                self.reset_label.value.setText(format_app_date(nxt))
+            else:
+                self.reset_label.value.setText("Tuesday 7:15")
+        except Exception:
+            self.reset_label.value.setText("Tuesday 7:15")
 
     def reload(self):
-        if self.web is not None:
-            self.web.setUrl(QUrl(METHOD_DEEP_DESERT_URL))
-        else:
-            webbrowser.open(METHOD_DEEP_DESERT_URL)
+        try:
+            meta = deep_desert.load_meta()
+            self.sync_label.value.setText(format_app_date(str(meta.get("last_checked", ""))))
+            self.map_status.setText("Manual sync complete • Native renderer")
+        except Exception:
+            self.sync_label.value.setText("Native")
+            self.map_status.setText("Manual sync complete • Native renderer")
+        self.canvas.update()
 
 
 class GuildJoinDialog(QDialog):
@@ -1139,9 +1882,11 @@ class MainWindow(QMainWindow):
         self.selected_base_id_for_map: int | None = None
         self.selected_poi_id_for_map: int | None = None
         self._build_ui()
+        self._install_easter_egg_shortcut()
         self.refresh_all()
         self._sync_running = False
         self._last_auto_sync = 0.0
+        self.sync_manager = SyncManager(self)
         self.guild_sync_timer = QTimer(self)
         # Network sync runs on the UI thread right now, so keep it on a slower
         # cadence to avoid the app feeling frozen every few seconds. Manual
@@ -1149,6 +1894,7 @@ class MainWindow(QMainWindow):
         self.guild_sync_timer.setInterval(60000)
         self.guild_sync_timer.timeout.connect(self.auto_sync_guild)
         self.guild_sync_timer.start()
+        QTimer.singleShot(1200, self.prompt_catalog_images_if_missing)
 
     def _build_ui(self):
         root = QWidget()
@@ -1160,18 +1906,33 @@ class MainWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("SideBar")
-        sidebar.setFixedWidth(285)
+        sidebar.setFixedWidth(310)
         side_layout = QVBoxLayout(sidebar)
-        side_layout.setContentsMargins(16, 28, 16, 22)
-        brand = QLabel("STANKY\nTOOLS")
+        side_layout.setContentsMargins(14, 18, 14, 16)
+        side_layout.setSpacing(10)
+
+        side_header = QFrame()
+        side_header.setObjectName("SideHeader")
+        head_layout = QVBoxLayout(side_header)
+        head_layout.setContentsMargins(14, 14, 14, 14)
+        head_layout.setSpacing(6)
+        brand = QLabel("STANKYTOOLS")
         brand.setObjectName("Brand")
-        brand.setAlignment(Qt.AlignCenter)
-        sub = QLabel("FOR GUILD. FOR ARRAKIS.")
+        brand.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        sub = QLabel("TACTICAL COMPANION")
         sub.setObjectName("BrandSub")
-        sub.setAlignment(Qt.AlignCenter)
-        side_layout.addWidget(brand)
-        side_layout.addWidget(sub)
-        side_layout.addSpacing(24)
+        version = QLabel(f"v{updater.APP_VERSION}")
+        version.setObjectName("VersionPill")
+        version.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        guild_status = QLabel((db.get_setting("guild_name", "No Guild") or "No Guild").upper())
+        guild_status.setObjectName("MicroLabel")
+        head_layout.addWidget(brand)
+        head_layout.addWidget(sub)
+        head_layout.addSpacing(4)
+        head_layout.addWidget(version, alignment=Qt.AlignLeft)
+        head_layout.addWidget(guild_status)
+        side_layout.addWidget(side_header)
+        side_layout.addSpacing(8)
 
         self.pages = QStackedWidget()
         page_specs = [
@@ -1192,10 +1953,10 @@ class MainWindow(QMainWindow):
                 icon_path = asset_path("icons", icon_name)
             if icon_path.exists():
                 btn.setIcon(QIcon(str(icon_path)))
-                btn.setIconSize(QSize(172, 122))
-            btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-            btn.setMinimumHeight(178)
-            btn.setMaximumHeight(196)
+                btn.setIconSize(QSize(26, 26))
+            btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            btn.setMinimumHeight(52)
+            btn.setMaximumHeight(58)
             btn.setObjectName("NavButton")
             btn.setProperty("active", idx == 0)
             if label == "Guild":
@@ -1207,11 +1968,106 @@ class MainWindow(QMainWindow):
             side_layout.addWidget(btn)
             self.pages.addWidget(builder())
         side_layout.addStretch()
-        side_layout.addWidget(QLabel("v1.0 modern foundation"))
+        side_footer = QFrame()
+        side_footer.setObjectName("SideFooter")
+        foot_layout = QVBoxLayout(side_footer)
+        foot_layout.setContentsMargins(12, 12, 12, 12)
+        foot_layout.setSpacing(8)
+        foot_layout.addWidget(StatusPill("Build", f"v{updater.APP_VERSION}"))
+        side_layout.addWidget(side_footer)
 
         main.addWidget(sidebar)
         main.addWidget(self.pages, 1)
         self.update_guild_nav_visibility()
+
+    def _install_easter_egg_shortcut(self):
+        """Hidden in-app YouTube popup. Press Ctrl+Alt+S."""
+        try:
+            self.easter_egg_shortcut = QShortcut(QKeySequence("Ctrl+Alt+S"), self)
+            self.easter_egg_shortcut.activated.connect(self.show_spice_easter_egg)
+        except Exception:
+            pass
+
+    def show_spice_easter_egg(self):
+        """Show the polished local MP4 classified transmission.
+
+        The video is downloaded from GitHub Releases on first use, then cached
+        locally. The overlay autoplays, has no playback controls, and closes
+        itself when the media reaches the end.
+        """
+        video_path = ensure_easter_egg_video(self)
+        if not video_path:
+            return
+        if not MULTIMEDIA_AVAILABLE:
+            try:
+                webbrowser.open(video_path.as_uri())
+            except Exception:
+                QMessageBox.information(self, "Classified Transmission", f"Video saved at:\n{video_path}")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("CLASSIFIED TRANSMISSION")
+        dlg.setModal(True)
+        dlg.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        dlg.setMinimumSize(980, 620)
+        dlg.setObjectName("ClassifiedTransmissionDialog")
+        dlg.setStyleSheet("""
+            QDialog#ClassifiedTransmissionDialog {
+                background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #030303, stop:1 #14100a);
+                border: 1px solid rgba(214,174,90,0.55);
+                border-radius: 16px;
+            }
+        """)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        header_row = QHBoxLayout()
+        header = QLabel("CLASSIFIED TRANSMISSION")
+        header.setObjectName("SectionTitle")
+        header.setStyleSheet("letter-spacing: 3px; color: #D6AE5A; font-size: 18px; font-weight: 800;")
+        status = StatusPill("Signal", "Unlocked")
+        header_row.addWidget(header)
+        header_row.addStretch()
+        header_row.addWidget(status)
+
+        video = QVideoWidget()
+        video.setMinimumHeight(500)
+        video.setStyleSheet("background: #000; border: 1px solid rgba(214,174,90,0.35); border-radius: 12px;")
+
+        footer = QLabel("ESC TO CLOSE")
+        footer.setAlignment(Qt.AlignCenter)
+        footer.setObjectName("MicroLabel")
+        footer.setStyleSheet("color: rgba(245,243,237,0.45); letter-spacing: 2px;")
+
+        player = QMediaPlayer(dlg)
+        audio = QAudioOutput(dlg)
+        audio.setVolume(0.90)
+        player.setAudioOutput(audio)
+        player.setVideoOutput(video)
+        player.setSource(QUrl.fromLocalFile(str(video_path.resolve())))
+
+        def _media_status_changed(status_value):
+            try:
+                if status_value == QMediaPlayer.MediaStatus.EndOfMedia:
+                    QTimer.singleShot(150, dlg.accept)
+            except Exception:
+                pass
+
+        player.mediaStatusChanged.connect(_media_status_changed)
+        dlg.finished.connect(lambda *_: player.stop())
+
+        close_shortcut = QShortcut(QKeySequence("Esc"), dlg)
+        close_shortcut.activated.connect(dlg.accept)
+
+        layout.addLayout(header_row)
+        layout.addWidget(video, 1)
+        layout.addWidget(footer)
+
+        # Start once the dialog has had a chance to initialize its video surface.
+        QTimer.singleShot(250, player.play)
+        dlg.exec()
 
     def set_page(self, index: int):
         # Guild page is an admin-only area. Members can see public guild info on the dashboard,
@@ -1281,97 +2137,238 @@ class MainWindow(QMainWindow):
         return page, layout
 
     def _build_dashboard_page(self) -> QWidget:
-        page, layout = self._page_shell("Dashboard", "Guild command center for Arrakis operations.")
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(22, 22, 22, 22)
+        outer.setSpacing(18)
+
+        hero = HeroFrame(asset_path("backgrounds", "dashboard_banner.png"))
+        hero.setMinimumHeight(190)
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(32, 24, 32, 24)
+        hero_layout.setSpacing(22)
+
+        hero_text = QVBoxLayout()
+        kicker = QLabel("STANKYTOOLS COMMAND CENTER")
+        kicker.setObjectName("HeroKicker")
+        title = QLabel("ARRAKIS OPERATIONS")
+        title.setObjectName("HeroTitle")
+        subtitle = QLabel("Market intelligence • Guild coordination • Tactical map control")
+        subtitle.setObjectName("HeroSub")
+        self.dashboard_sync_status = QLabel("SYNC STATUS: READY")
+        self.dashboard_sync_status.setObjectName("VersionPill")
+        hero_text.addWidget(kicker)
+        hero_text.addWidget(title)
+        hero_text.addWidget(subtitle)
+        hero_text.addStretch()
+        hero_text.addWidget(self.dashboard_sync_status, alignment=Qt.AlignLeft)
+        hero_layout.addLayout(hero_text, 1)
+
+        hero_status = QVBoxLayout()
+        self.dashboard_hero_guild = StatusPill("Guild", db.get_setting("guild_name", "Not Joined") or "Not Joined")
+        self.dashboard_hero_version = StatusPill("Build", f"v{updater.APP_VERSION}")
+        hero_status.addWidget(self.dashboard_hero_guild)
+        hero_status.addWidget(self.dashboard_hero_version)
+        hero_status.addStretch()
+        hero_layout.addLayout(hero_status)
+        outer.addWidget(hero)
+
         self.stat_grid = QGridLayout()
         self.stat_grid.setSpacing(14)
-        layout.addLayout(self.stat_grid)
+        self.dashboard_stat_members = PremiumStatCard("Guild Members", "—", "Current roster")
+        self.dashboard_stat_bases = PremiumStatCard("Guild Bases", "—", "Hagga Basin operations")
+        self.dashboard_stat_pois = PremiumStatCard("Deep Desert POIs", "—", "Shared tactical markers")
+        self.dashboard_stat_items = PremiumStatCard("Items Tracked", "—", "Market catalog")
+        for idx, card in enumerate([self.dashboard_stat_members, self.dashboard_stat_bases, self.dashboard_stat_pois, self.dashboard_stat_items]):
+            self.stat_grid.addWidget(card, 0, idx)
+        outer.addLayout(self.stat_grid)
 
-        command_row = QHBoxLayout()
+        actions_panel = QFrame()
+        actions_panel.setObjectName("CommandCard")
+        actions_layout = QVBoxLayout(actions_panel)
+        actions_layout.setContentsMargins(16, 14, 16, 16)
+        actions_layout.setSpacing(12)
+        actions_title = QLabel("QUICK ACTIONS")
+        actions_title.setObjectName("SectionTitle")
+        actions_layout.addWidget(actions_title)
+        actions_row = QGridLayout()
+        actions_row.setSpacing(12)
+        action_scan = QuickActionCard("◈", "Scan Auction", "Capture and record new market prices")
+        action_map = QuickActionCard("◎", "Deep Desert", "Open tactical POI map")
+        action_market = QuickActionCard("▣", "Auction House", "Review tracked prices")
+        action_guild = QuickActionCard("◆", "Manage Guild", "Members, news, and links")
+        action_sync = QuickActionCard("⚙", "Sync Settings", "Manual sync lives in Settings only")
+        action_scan.clicked.connect(lambda: self.open_market_tab(2))
+        action_map.clicked.connect(lambda: self.set_page(2))
+        action_market.clicked.connect(lambda: self.open_market_tab(0))
+        action_guild.clicked.connect(self.open_guild_admin_page)
+        action_sync.clicked.connect(lambda: self.set_page(5))
+        self.dashboard_guild_button = action_guild
+        for idx, action in enumerate([action_scan, action_map, action_market, action_guild, action_sync]):
+            actions_row.addWidget(action, 0, idx)
+        actions_layout.addLayout(actions_row)
+        outer.addWidget(actions_panel)
+
+        lower = QHBoxLayout()
+        lower.setSpacing(14)
+
+        market_panel = QFrame()
+        market_panel.setObjectName("CommandCard")
+        market_layout = QVBoxLayout(market_panel)
+        market_layout.setContentsMargins(16, 14, 16, 16)
+        market_title = QLabel("MARKET MOVERS")
+        market_title.setObjectName("SectionTitle")
+        market_layout.addWidget(market_title)
+        self.dashboard_market_movers = QVBoxLayout()
+        self.dashboard_market_movers.setSpacing(10)
+        market_layout.addLayout(self.dashboard_market_movers)
+        market_layout.addStretch()
+
+        news_panel = QFrame()
+        news_panel.setObjectName("CommandCard")
+        news_layout = QVBoxLayout(news_panel)
+        news_layout.setContentsMargins(16, 14, 16, 16)
+        news_header = QHBoxLayout()
+        news_title = QLabel("GUILD ANNOUNCEMENTS")
+        news_title.setObjectName("SectionTitle")
+        view_guild = QPushButton("Open Guild")
+        view_guild.clicked.connect(self.open_guild_admin_page)
+        news_header.addWidget(news_title, 1)
+        news_header.addWidget(view_guild)
+        news_layout.addLayout(news_header)
+        self.dashboard_news_cards = QVBoxLayout()
+        self.dashboard_news_cards.setSpacing(10)
+        news_layout.addLayout(self.dashboard_news_cards)
+        news_layout.addStretch()
+
+        links_panel = QFrame()
+        links_panel.setObjectName("CommandCard")
+        links_layout = QVBoxLayout(links_panel)
+        links_layout.setContentsMargins(16, 14, 16, 16)
+        links_header = QHBoxLayout()
+        links_title = QLabel("HELPFUL LINKS")
+        links_title.setObjectName("SectionTitle")
+        links_header.addWidget(links_title, 1)
+        links_layout.addLayout(links_header)
+        self.dashboard_link_cards = QVBoxLayout()
+        self.dashboard_link_cards.setSpacing(10)
+        links_layout.addLayout(self.dashboard_link_cards)
+        links_layout.addStretch()
+
+        upcoming_panel = QFrame()
+        upcoming_panel.setObjectName("CommandCard")
+        upcoming_layout = QVBoxLayout(upcoming_panel)
+        upcoming_layout.setContentsMargins(16, 14, 16, 16)
+        upcoming_title = QLabel("UPCOMING")
+        upcoming_title.setObjectName("SectionTitle")
+        upcoming_layout.addWidget(upcoming_title)
+        self.dashboard_reset_card = PremiumStatCard("Tuesday Reset", "—", "Deep Desert rotation")
+        self.dashboard_scan_card = PremiumStatCard("Last Scan", "Ready", "Scanner standby")
+        upcoming_layout.addWidget(self.dashboard_reset_card)
+        upcoming_layout.addWidget(self.dashboard_scan_card)
+        upcoming_layout.addStretch()
+
+        # Hidden compatibility tables keep existing double-click/detail methods and refresh paths intact.
         self.dashboard_links_table = StankyTable(["Title", "URL", "Poster"])
         self.news_table = StankyTable(["Latest News", "Poster", "Date"])
-        self.dashboard_links_table.setWordWrap(True)
-        self.news_table.setWordWrap(True)
-        self.dashboard_links_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.dashboard_links_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.dashboard_links_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.dashboard_links_table.hide()
+        self.news_table.hide()
         self.dashboard_links_table.cellDoubleClicked.connect(self.open_selected_dashboard_link)
-        self.news_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.news_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.news_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.news_table.cellDoubleClicked.connect(self.show_dashboard_news_detail)
 
-        links_panel = self._panel("Useful Links", self.dashboard_links_table)
-        news_panel = self._panel("Guild News", self.news_table)
-        news_panel.setMinimumWidth(620)
-        self.news_table.setMinimumWidth(600)
-
-        guild_card = QFrame()
-        guild_card.setObjectName("Panel")
-        guild_layout = QVBoxLayout(guild_card)
-        guild_layout.setContentsMargins(18, 18, 18, 18)
-        title = QLabel("Guild Operations")
-        title.setObjectName("SectionTitle")
-        self.dashboard_guild_logo = QLabel()
-        self.dashboard_guild_logo.setMinimumSize(520, 520)
-        self.dashboard_guild_logo.setMaximumSize(900, 900)
-        self.dashboard_guild_logo.setAlignment(Qt.AlignCenter)
-        self.dashboard_guild_logo.setStyleSheet("border:0px; background:transparent; padding:0px;")
-        self.dashboard_guild_name = QLabel("Guild: " + (db.get_setting("guild_name", "Guild") or "Guild"))
-        self.dashboard_guild_name.setAlignment(Qt.AlignCenter)
-        self.dashboard_guild_name.setStyleSheet("font-size:24px; font-weight:900; color:#fff0bf;")
-        self.dashboard_user = QLabel("Profile: " + (db.get_setting("display_name", "Not joined") or "Not joined"))
-        self.dashboard_user.setAlignment(Qt.AlignCenter)
-        self.dashboard_user.setStyleSheet("color:#d4ae63; font-size:15px;")
-        self.dashboard_members = QLabel("Members: —")
-        self.dashboard_members.setAlignment(Qt.AlignCenter)
-        self.dashboard_members.setStyleSheet("color:#f0dfb5; font-size:18px; font-weight:800;")
-        quick = QHBoxLayout()
-        b1 = QPushButton("Hagga Basin")
-        b1.clicked.connect(lambda: self.set_page(3))
-        b2 = QPushButton("Deep Desert")
-        b2.clicked.connect(lambda: self.set_page(2))
-        b3 = QPushButton("Guild")
-        b3.setObjectName("PrimaryButton")
-        self.dashboard_guild_button = b3
-        b3.clicked.connect(self.open_guild_admin_page)
-        quick.addWidget(b1)
-        quick.addWidget(b2)
-        quick.addWidget(b3)
-        guild_layout.addWidget(title)
-        guild_layout.addWidget(self.dashboard_guild_logo, 1, alignment=Qt.AlignCenter)
-        guild_layout.addWidget(self.dashboard_guild_name)
-        guild_layout.addWidget(self.dashboard_user)
-        guild_layout.addWidget(self.dashboard_members)
-        guild_layout.addSpacing(10)
-        guild_layout.addLayout(quick)
-
-        command_row.addWidget(links_panel, 1)
-        command_row.addWidget(news_panel, 3)
-        command_row.addWidget(guild_card, 1)
-        layout.addLayout(command_row, 1)
+        lower.addWidget(market_panel, 2)
+        lower.addWidget(news_panel, 3)
+        lower.addWidget(links_panel, 3)
+        lower.addWidget(upcoming_panel, 2)
+        outer.addLayout(lower, 1)
         return page
 
     def _build_market_page(self) -> QWidget:
-        page, layout = self._page_shell("Market", "Market, catalog, and scanner command center.")
+        page, layout = self._page_shell("Auction House", "Professional trading terminal for tracked market intelligence.")
         self.market_tabs = QTabWidget()
         self.market_tabs.setDocumentMode(True)
 
-        # Market tab
+        # Trading terminal tab
         market_tab = QWidget()
-        market_layout = QVBoxLayout(market_tab)
+        market_layout = QHBoxLayout(market_tab)
         market_layout.setContentsMargins(0, 0, 0, 0)
-        controls = QHBoxLayout()
+        market_layout.setSpacing(16)
+
+        left_panel = QFrame()
+        left_panel.setObjectName("CommandCard")
+        left_panel_layout = QVBoxLayout(left_panel)
+        left_panel_layout.setContentsMargins(16, 14, 16, 16)
+        left_panel_layout.setSpacing(12)
+        terminal_header = QHBoxLayout()
+        terminal_title = QLabel("AUCTION TERMINAL")
+        terminal_title.setObjectName("SectionTitle")
         self.market_search = QLineEdit()
-        self.market_search.setPlaceholderText("Search market...")
+        self.market_search.setPlaceholderText("Search item, category, resource...")
         self.market_search.textChanged.connect(self.refresh_market)
         record_btn = QPushButton("Record Price")
         record_btn.setObjectName("PrimaryButton")
         record_btn.clicked.connect(self.record_selected_market_price)
-        controls.addWidget(self.market_search, 1)
-        controls.addWidget(record_btn)
-        market_layout.addLayout(controls)
-        self.market_table = StankyTable(["Name", "Category", "Grade", "Lowest Price", "Avg Price", "Highest Price", "Seen", "Last Updated"])
-        market_layout.addWidget(self.market_table, 1)
+        terminal_header.addWidget(terminal_title)
+        terminal_header.addStretch()
+        terminal_header.addWidget(self.market_search, 2)
+        terminal_header.addWidget(record_btn)
+        left_panel_layout.addLayout(terminal_header)
+
+        self.market_table = StankyTable(["Item", "Category", "Grade", "Low", "Average", "High", "Seen", "Updated"])
+        self.market_table.setMinimumWidth(700)
+        self.market_table.itemSelectionChanged.connect(self.update_market_terminal_details)
+        self.market_table.cellDoubleClicked.connect(lambda r, c: self.record_selected_market_price())
+        self.market_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.market_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.market_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        left_panel_layout.addWidget(self.market_table, 1)
+        market_layout.addWidget(left_panel, 3)
+
+        detail_panel = QFrame()
+        detail_panel.setObjectName("CommandCard")
+        detail_layout = QVBoxLayout(detail_panel)
+        detail_layout.setContentsMargins(18, 16, 18, 16)
+        detail_layout.setSpacing(12)
+        detail_title = QLabel("ITEM INTELLIGENCE")
+        detail_title.setObjectName("SectionTitle")
+        detail_layout.addWidget(detail_title)
+        self.market_item_image = QLabel()
+        self.market_item_image.setAlignment(Qt.AlignCenter)
+        self.market_item_image.setMinimumHeight(220)
+        self.market_item_image.setStyleSheet("border:1px solid rgba(214,174,90,0.35); border-radius:16px; background:#100d09;")
+        detail_layout.addWidget(self.market_item_image)
+        self.market_item_name = QLabel("Select an item")
+        self.market_item_name.setObjectName("HeroSub")
+        self.market_item_name.setWordWrap(True)
+        self.market_item_meta = QLabel("Market details will appear here.")
+        self.market_item_meta.setObjectName("CardHint")
+        self.market_item_meta.setWordWrap(True)
+        detail_layout.addWidget(self.market_item_name)
+        detail_layout.addWidget(self.market_item_meta)
+        stat_grid = QGridLayout()
+        stat_grid.setSpacing(10)
+        self.market_stat_current = PremiumStatCard("Current", "—", "Lowest listing")
+        self.market_stat_average = PremiumStatCard("Guild Avg", "—", "Observed average")
+        self.market_stat_supply = PremiumStatCard("Supply", "—", "Seen count")
+        self.market_stat_profit = PremiumStatCard("Profit", "—", "High minus low")
+        for idx, card in enumerate([self.market_stat_current, self.market_stat_average, self.market_stat_supply, self.market_stat_profit]):
+            stat_grid.addWidget(card, idx // 2, idx % 2)
+        detail_layout.addLayout(stat_grid)
+        self.market_history_graph = PriceHistoryGraph()
+        detail_layout.addWidget(self.market_history_graph)
+        actions = QHBoxLayout()
+        self.market_watchlist_btn = QPushButton("Add Watchlist")
+        self.market_watchlist_btn.clicked.connect(self.toggle_selected_watchlist)
+        self.market_favorite_btn = QPushButton("Favorite")
+        self.market_favorite_btn.clicked.connect(self.toggle_selected_favorite)
+        self.market_scan_btn = QPushButton("Scanner")
+        self.market_scan_btn.clicked.connect(lambda: self.open_market_tab(2))
+        actions.addWidget(self.market_watchlist_btn)
+        actions.addWidget(self.market_favorite_btn)
+        actions.addWidget(self.market_scan_btn)
+        detail_layout.addLayout(actions)
+        detail_layout.addStretch()
+        market_layout.addWidget(detail_panel, 2)
 
         # Catalog tab
         catalog_tab = QWidget()
@@ -1385,9 +2382,12 @@ class MainWindow(QMainWindow):
         self.catalog_category.currentTextChanged.connect(self.refresh_catalog)
         self.catalog_import_button = QPushButton("Import Dune Item Database")
         self.catalog_import_button.clicked.connect(self.import_catalog)
+        self.catalog_github_images_button = QPushButton("Import Images from GitHub")
+        self.catalog_github_images_button.clicked.connect(self.import_catalog_images_from_github)
         catalog_controls.addWidget(self.catalog_search, 2)
         catalog_controls.addWidget(self.catalog_category, 1)
         catalog_controls.addWidget(self.catalog_import_button)
+        catalog_controls.addWidget(self.catalog_github_images_button)
         catalog_layout.addLayout(catalog_controls)
         self.catalog_import_status = QLabel("Ready.")
         self.catalog_import_status.setStyleSheet("color:#9f8150;")
@@ -1410,12 +2410,12 @@ class MainWindow(QMainWindow):
         scanner_layout = QVBoxLayout(scanner_tab)
         scanner_layout.setContentsMargins(0, 0, 0, 0)
         panel = QFrame()
-        panel.setObjectName("Panel")
+        panel.setObjectName("CommandCard")
         p = QVBoxLayout(panel)
         p.setContentsMargins(24, 24, 24, 24)
-        label = QLabel("Auction House Scanner")
+        label = QLabel("SCANNER BRIDGE")
         label.setObjectName("SectionTitle")
-        help_text = QLabel("Choose an item from the catalog, then scan or enter the auction price. The scanner only updates price history for the selected item; it never guesses names or images.")
+        help_text = QLabel("Choose an item from the catalog, then scan or enter the auction price. The scanner updates price history for the selected item only.")
         help_text.setWordWrap(True)
         p.addWidget(label)
         p.addWidget(help_text)
@@ -1448,7 +2448,7 @@ class MainWindow(QMainWindow):
         p.addStretch()
         scanner_layout.addWidget(panel, 1)
 
-        self.market_tabs.addTab(market_tab, "Market")
+        self.market_tabs.addTab(market_tab, "Terminal")
         self.market_tabs.addTab(catalog_tab, "Catalog")
         self.market_tabs.addTab(scanner_tab, "Scanner")
         layout.addWidget(self.market_tabs, 1)
@@ -1464,9 +2464,12 @@ class MainWindow(QMainWindow):
         self.catalog_category.currentTextChanged.connect(self.refresh_catalog)
         self.catalog_import_button = QPushButton("Import Dune Item Database")
         self.catalog_import_button.clicked.connect(self.import_catalog)
+        self.catalog_github_images_button = QPushButton("Import Images from GitHub")
+        self.catalog_github_images_button.clicked.connect(self.import_catalog_images_from_github)
         controls.addWidget(self.catalog_search, 2)
         controls.addWidget(self.catalog_category, 1)
         controls.addWidget(self.catalog_import_button)
+        controls.addWidget(self.catalog_github_images_button)
         layout.addLayout(controls)
         self.catalog_import_status = QLabel("Ready.")
         self.catalog_import_status.setStyleSheet("color:#9f8150;")
@@ -1530,50 +2533,25 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_deep_desert_page(self) -> QWidget:
-        page, layout = self._page_shell("Deep Desert", "Built-in tactical map and guild POIs.")
-        body = QHBoxLayout()
-        self.map_tabs = QTabWidget()
+        page, layout = self._page_shell("Deep Desert", "Simple native map with one-click guild POI placement.")
+
         self.live_deep_desert = LiveDeepDesertView()
-        self.map_view = DeepDesertMapView()
-        self.map_view.add_poi_callback = self.add_poi_at
-        self.map_tabs.addTab(self.live_deep_desert, "Live Map + Filters")
-        self.map_tabs.addTab(self.map_view, "Guild POI Overlay")
-        poi_panel = QFrame()
-        poi_panel.setObjectName("Panel")
-        poi_layout = QVBoxLayout(poi_panel)
-        poi_layout.setContentsMargins(14, 14, 14, 14)
-        title = QLabel("Guild POIs")
-        title.setObjectName("SectionTitle")
+        self.live_deep_desert.add_poi_callback = self.add_poi_at
+        self.map_view = self.live_deep_desert.canvas
+        layout.addWidget(self.live_deep_desert, 1)
+
+        # Hidden backing table keeps the existing edit/delete/context-menu code working,
+        # while the user-facing Deep Desert page stays focused on the map itself.
         self.poi_table = StankyTable(["Type", "Status", "Note"])
-        self.poi_table.setWordWrap(True)
-        self.poi_table.setMaximumWidth(760)
+        self.poi_table.setVisible(False)
         self.poi_table.cellClicked.connect(self.center_on_poi)
         self.poi_table.cellDoubleClicked.connect(self.center_on_poi)
         self.poi_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.poi_table.customContextMenuRequested.connect(self.show_poi_context_menu)
-        self.poi_table.setColumnWidth(0, 120)
-        self.poi_table.setColumnWidth(1, 95)
-        self.poi_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
-        self.poi_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Fixed)
-        self.poi_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        btns = QHBoxLayout()
-        reset = QPushButton("Reset View")
-        reset.clicked.connect(lambda: self.map_view.reset_view())
-        refresh = QPushButton("Sync POIs")
-        refresh.setObjectName("PrimaryButton")
-        refresh.clicked.connect(self.sync_guild_pois)
-        btns.addWidget(reset)
-        btns.addWidget(refresh)
-        poi_layout.addWidget(title)
-        self.poi_sync_status = QLabel("Auto-sync starts when you join a guild.")
-        self.poi_sync_status.setStyleSheet("color:#9f8150;")
-        poi_layout.addWidget(QLabel("Double-click map to add POI. Use Status when your guild takes a base."))
-        poi_layout.addWidget(self.poi_sync_status)
-        poi_layout.addLayout(btns)
-        poi_layout.addWidget(self.poi_table, 2)
-        body.addWidget(self.map_tabs, 3)
-        body.addWidget(poi_panel, 1)
-        layout.addLayout(body, 1)
+        self.poi_sync_status = QLabel("Auto-sync enabled")
+        self.poi_sync_status.setVisible(False)
+        layout.addWidget(self.poi_table)
+        layout.addWidget(self.poi_sync_status)
         return page
 
     def _build_hagga_basin_page(self) -> QWidget:
@@ -1621,7 +2599,7 @@ class MainWindow(QMainWindow):
         row.addWidget(delete)
         row.addWidget(reset)
         base_layout.addLayout(row)
-        self.base_sync_status = QLabel("Base markers sync with your guild code.")
+        self.base_sync_status = QLabel("Auto-sync is enabled. Base marker changes sync immediately after save.")
         self.base_sync_status.setStyleSheet("color:#9f8150;")
         base_layout.addWidget(self.base_sync_status)
 
@@ -1631,57 +2609,106 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_guild_page(self) -> QWidget:
-        page, layout = self._page_shell("Guild", "Members, roles, news, links, and command updates.")
-        body = QHBoxLayout()
+        page, layout = self._page_shell("Guild Command", "Roster, command updates, links, and officer operations.")
 
-        members_panel = QFrame()
-        members_panel.setObjectName("Panel")
-        members_layout = QVBoxLayout(members_panel)
-        members_layout.setContentsMargins(16, 16, 16, 16)
-        members_title = QLabel("Members & Roles")
+        banner = QFrame()
+        banner.setObjectName("HeroBanner")
+        banner_layout = QHBoxLayout(banner)
+        banner_layout.setContentsMargins(24, 20, 24, 20)
+        banner_layout.setSpacing(18)
+
+        logo = QLabel()
+        logo.setFixedSize(86, 86)
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setStyleSheet("border:1px solid rgba(214,174,90,0.45); border-radius:14px; background:rgba(0,0,0,0.35);")
+        logo_path = resolve_local_path(db.get_setting("guild_logo_path", ""))
+        if logo_path.exists():
+            logo.setPixmap(QPixmap(str(logo_path)).scaled(78, 78, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            logo.setText("GW")
+            logo.setStyleSheet(logo.styleSheet() + " color:#D6AE5A; font-size:24px; font-weight:900;")
+
+        title_block = QVBoxLayout()
+        title = QLabel((db.get_setting("guild_name", "No Guild") or "No Guild").upper())
+        title.setObjectName("HeroTitle")
+        subtitle = QLabel("TACTICAL GUILD OPERATIONS")
+        subtitle.setObjectName("MicroLabel")
+        title_block.addWidget(title)
+        title_block.addWidget(subtitle)
+        title_block.addStretch()
+
+        role = StatusPill("Role", db.get_setting("guild_role", "member") or "member")
+        code = StatusPill("Code", db.get_setting("guild_code", "—") or "—")
+        banner_layout.addWidget(logo)
+        banner_layout.addLayout(title_block, 1)
+        banner_layout.addWidget(role)
+        banner_layout.addWidget(code)
+        layout.addWidget(banner)
+
+        stats = QHBoxLayout()
+        self.guild_stat_members = PremiumStatCard("Members", "—", "Roster size")
+        self.guild_stat_officers = PremiumStatCard("Officers", "—", "Command staff")
+        self.guild_stat_news = PremiumStatCard("Announcements", "—", "Guild news posts")
+        self.guild_stat_links = PremiumStatCard("Helpful Links", "—", "Pinned resources")
+        stats.addWidget(self.guild_stat_members)
+        stats.addWidget(self.guild_stat_officers)
+        stats.addWidget(self.guild_stat_news)
+        stats.addWidget(self.guild_stat_links)
+        layout.addLayout(stats)
+
+        body = QHBoxLayout()
+        body.setSpacing(14)
+
+        left_panel = QFrame()
+        left_panel.setObjectName("Panel")
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(16, 16, 16, 16)
+        left_layout.setSpacing(10)
+        members_title = QLabel("ROSTER")
         members_title.setObjectName("SectionTitle")
-        members_layout.addWidget(members_title)
+        left_layout.addWidget(members_title)
         self.guild_page_members = StankyTable(["Member", "Role"])
         self.guild_page_members.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.guild_page_members.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        members_layout.addWidget(self.guild_page_members, 1)
-        member_buttons = QHBoxLayout()
-        refresh_members = QPushButton("Refresh Members")
-        refresh_members.clicked.connect(self.refresh_guild_page)
+        left_layout.addWidget(self.guild_page_members, 1)
         manage_members = QPushButton("Manage Members")
         manage_members.setObjectName("PrimaryButton")
         manage_members.clicked.connect(self.show_members_roles_dialog)
-        member_buttons.addWidget(refresh_members)
-        member_buttons.addWidget(manage_members)
-        members_layout.addLayout(member_buttons)
+        left_layout.addWidget(manage_members)
 
-        right_panel = QFrame()
-        right_panel.setObjectName("Panel")
-        right_panel.setMinimumWidth(760)
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(16, 16, 16, 16)
-        news_title = QLabel("Guild News")
+        center_panel = QFrame()
+        center_panel.setObjectName("Panel")
+        center_layout = QVBoxLayout(center_panel)
+        center_layout.setContentsMargins(16, 16, 16, 16)
+        center_layout.setSpacing(10)
+        news_title = QLabel("GUILD ANNOUNCEMENTS")
         news_title.setObjectName("SectionTitle")
-        right_layout.addWidget(news_title)
+        center_layout.addWidget(news_title)
         self.guild_page_news = StankyTable(["Latest News", "Poster", "Date"])
-        self.guild_page_news.setMinimumWidth(730)
         self.guild_page_news.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.guild_page_news.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.guild_page_news.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.guild_page_news.cellDoubleClicked.connect(self.show_guild_news_detail)
-        right_layout.addWidget(self.guild_page_news, 1)
+        center_layout.addWidget(self.guild_page_news, 1)
         news_buttons = QHBoxLayout()
-        add_news = QPushButton("Submit Guild Update")
+        add_news = QPushButton("Post Update")
         add_news.setObjectName("PrimaryButton")
         add_news.clicked.connect(self.submit_guild_news)
-        delete_news = QPushButton("Delete News")
+        delete_news = QPushButton("Delete Selected")
         delete_news.clicked.connect(self.delete_selected_guild_news)
         news_buttons.addWidget(add_news)
         news_buttons.addWidget(delete_news)
         news_buttons.addStretch()
-        right_layout.addLayout(news_buttons)
+        center_layout.addLayout(news_buttons)
 
-        links_title = QLabel("Useful Links")
+        right_panel = QFrame()
+        right_panel.setObjectName("Panel")
+        right_panel.setMinimumWidth(420)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(16, 16, 16, 16)
+        right_layout.setSpacing(10)
+
+        links_title = QLabel("HELPFUL LINKS")
         links_title.setObjectName("SectionTitle")
         right_layout.addWidget(links_title)
         self.guild_page_links = StankyTable(["Title", "URL", "Poster"])
@@ -1691,19 +2718,18 @@ class MainWindow(QMainWindow):
         self.guild_page_links.cellDoubleClicked.connect(self.open_selected_guild_link)
         right_layout.addWidget(self.guild_page_links, 1)
         link_buttons = QHBoxLayout()
-        add_link = QPushButton("Add Link")
+        add_link = QPushButton("Add")
         add_link.clicked.connect(self.add_guild_link)
-        edit_link = QPushButton("Edit Link")
+        edit_link = QPushButton("Edit")
         edit_link.clicked.connect(self.edit_guild_link)
-        delete_link = QPushButton("Delete Link")
+        delete_link = QPushButton("Delete")
         delete_link.clicked.connect(self.delete_guild_link)
         link_buttons.addWidget(add_link)
         link_buttons.addWidget(edit_link)
         link_buttons.addWidget(delete_link)
-        link_buttons.addStretch()
         right_layout.addLayout(link_buttons)
 
-        activity_title = QLabel("Activity Feed")
+        activity_title = QLabel("ACTIVITY")
         activity_title.setObjectName("SectionTitle")
         right_layout.addWidget(activity_title)
         self.guild_page_activity = StankyTable(["Date", "Actor", "Activity"])
@@ -1712,7 +2738,8 @@ class MainWindow(QMainWindow):
         self.guild_page_activity.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         right_layout.addWidget(self.guild_page_activity, 1)
 
-        body.addWidget(members_panel, 1)
+        body.addWidget(left_panel, 2)
+        body.addWidget(center_panel, 4)
         body.addWidget(right_panel, 3)
         layout.addLayout(body, 1)
         QTimer.singleShot(250, self.refresh_guild_page)
@@ -1810,6 +2837,28 @@ class MainWindow(QMainWindow):
         maintenance_layout.addLayout(maintenance_buttons)
         p.addWidget(maintenance_panel)
 
+        sync_panel = QFrame()
+        sync_panel.setObjectName("Card")
+        sync_layout = QVBoxLayout(sync_panel)
+        sync_layout.setContentsMargins(16, 14, 16, 14)
+        sync_title = QLabel("SYNCHRONIZATION")
+        sync_title.setObjectName("CardTitle")
+        sync_layout.addWidget(sync_title)
+        self.settings_sync_status = QLabel("Auto Sync: Enabled • Changes queue immediately after saving news, POIs, and bases.")
+        self.settings_sync_status.setStyleSheet("color:#e0b65c; font-weight:800;")
+        self.settings_last_sync = QLabel("Last Sync: " + db.get_setting("last_manual_sync", "Not yet synced"))
+        self.settings_last_sync.setStyleSheet("color:#9f8150;")
+        sync_buttons = QHBoxLayout()
+        sync_now = QPushButton("Sync All Now")
+        sync_now.setObjectName("PrimaryButton")
+        sync_now.clicked.connect(self.settings_manual_sync_all)
+        sync_buttons.addWidget(sync_now)
+        sync_buttons.addStretch()
+        sync_layout.addWidget(self.settings_sync_status)
+        sync_layout.addWidget(self.settings_last_sync)
+        sync_layout.addLayout(sync_buttons)
+        p.addWidget(sync_panel)
+
         update_panel = QFrame()
         update_panel.setObjectName("Card")
         update_layout = QVBoxLayout(update_panel)
@@ -1836,6 +2885,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(panel)
         layout.addStretch()
         return page
+
+
+    def settings_manual_sync_all(self):
+        """Single user-facing manual sync entry point. Map and guild pages auto-sync on save."""
+        if hasattr(self, "settings_sync_status"):
+            self.settings_sync_status.setText("Manual Sync: Running...")
+        QApplication.processEvents()
+        try:
+            self.manual_sync_all_markers()
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            db.set_setting("last_manual_sync", stamp)
+            if hasattr(self, "settings_last_sync"):
+                self.settings_last_sync.setText("Last Sync: " + stamp)
+            if hasattr(self, "settings_sync_status"):
+                self.settings_sync_status.setText("Auto Sync: Enabled • Manual sync completed.")
+        except Exception as exc:
+            if hasattr(self, "settings_sync_status"):
+                self.settings_sync_status.setText("Manual Sync: Failed")
+            QMessageBox.critical(self, "Sync Failed", str(exc))
 
     def check_app_update(self):
         if hasattr(self, "update_status"):
@@ -1926,11 +2994,11 @@ class MainWindow(QMainWindow):
         guild = db.get_setting("guild_code", "").upper()
         if guild:
             self.sync_guild_dashboard_content(show_errors=False)
-        if hasattr(self, "dashboard_guild_name"):
+        if qt_alive(getattr(self, "dashboard_guild_name", None)):
             self.dashboard_guild_name.setText((db.get_setting("guild_name", "Guild") or "Guild") if guild else "Not in a Guild")
-        if hasattr(self, "dashboard_user"):
+        if qt_alive(getattr(self, "dashboard_user", None)):
             self.dashboard_user.setText("Profile: " + (db.get_setting("display_name", "Not joined") or "Not joined"))
-        if hasattr(self, "dashboard_members"):
+        if qt_alive(getattr(self, "dashboard_members", None)):
             members = getattr(self, "current_guild_members", None) or self.refresh_guild_members()
             self.dashboard_members.setText(f"Members: {len(members)}" if guild else "Members: —")
         if hasattr(self, "dashboard_guild_logo"):
@@ -1938,14 +3006,33 @@ class MainWindow(QMainWindow):
         stats = db.dashboard_stats()
         base_count = len(db.list_bases(guild)) if guild else 0
         members_count = len(getattr(self, "current_guild_members", []) or []) if guild else 0
-        cards = [
-            StatCard("Guild Members", fmt_price(members_count), "Current roster"),
-            StatCard("Guild Bases", fmt_price(base_count), "Hagga Basin"),
-            StatCard("Guild POIs", fmt_price(stats.get("pois", 0)), "Deep Desert intel"),
-            StatCard("Items Tracked", fmt_price(stats.get("catalog_items", 0)), "Catalog database"),
-        ]
-        for i, card in enumerate(cards):
-            self.stat_grid.addWidget(card, 0, i)
+        if hasattr(self, "dashboard_stat_members"):
+            self.dashboard_stat_members.set_value(fmt_price(members_count), "Current roster")
+            self.dashboard_stat_bases.set_value(fmt_price(base_count), "Hagga Basin operations")
+            self.dashboard_stat_pois.set_value(fmt_price(stats.get("pois", 0)), "Shared tactical markers")
+            self.dashboard_stat_items.set_value(fmt_price(stats.get("catalog_items", 0)), "Market catalog")
+            if qt_alive(getattr(self, "dashboard_hero_guild", None)):
+                labels = [lbl for lbl in self.dashboard_hero_guild.findChildren(QLabel) if qt_alive(lbl)]
+                if labels:
+                    labels[-1].setText((db.get_setting("guild_name", "Not Joined") or "Not Joined") if guild else "Not Joined")
+            if qt_alive(getattr(self, "dashboard_sync_status", None)):
+                self.dashboard_sync_status.setText("SYNC STATUS: ONLINE" if guild else "SYNC STATUS: LOCAL MODE")
+            if hasattr(self, "dashboard_reset_card"):
+                try:
+                    meta = deep_desert.load_meta()
+                    reset = str(meta.get("next_update", "Tuesday 7:15 AM"))
+                except Exception:
+                    reset = "Tuesday 7:15 AM"
+                self.dashboard_reset_card.set_value("TUESDAY", reset)
+        else:
+            cards = [
+                StatCard("Guild Members", fmt_price(members_count), "Current roster"),
+                StatCard("Guild Bases", fmt_price(base_count), "Hagga Basin"),
+                StatCard("Guild POIs", fmt_price(stats.get("pois", 0)), "Deep Desert markers"),
+                StatCard("Items Tracked", fmt_price(stats.get("catalog_items", 0)), "Catalog database"),
+            ]
+            for i, card in enumerate(cards):
+                self.stat_grid.addWidget(card, 0, i)
         self.refresh_dashboard_activity_tables()
 
     def refresh_catalog_categories(self):
@@ -2019,10 +3106,97 @@ class MainWindow(QMainWindow):
                 row["seen_count"] or 0,
                 row["last_seen"] or "—",
             ], {3, 4, 5, 6})
+            table_row = self.market_table.rowCount() - 1
+            for col in range(self.market_table.columnCount()):
+                item = self.market_table.item(table_row, col)
+                if item:
+                    item.setData(Qt.UserRole + 10, int(row["item_id"] or 0))
+                    item.setData(Qt.UserRole + 11, None if row["grade"] is None else int(row["grade"]))
         self.market_table.setSortingEnabled(True)
         self.market_table.setUpdatesEnabled(True)
+        if self.market_table.rowCount() > 0 and self.market_table.currentRow() < 0:
+            self.market_table.selectRow(0)
+        self.update_market_terminal_details()
+
+    def _csv_setting_values(self, key: str) -> set[str]:
+        raw = db.get_setting(key, "") or ""
+        return {part.strip() for part in raw.split(",") if part.strip()}
+
+    def _set_csv_setting_values(self, key: str, values: set[str]):
+        db.set_setting(key, ",".join(sorted(values)))
+
+    def _selected_market_row_data(self):
+        if not hasattr(self, "market_table") or self.market_table.currentRow() < 0:
+            return None
+        item = self.market_table.item(self.market_table.currentRow(), 0)
+        if not item:
+            return None
+        item_id = item.data(Qt.UserRole + 10)
+        grade = item.data(Qt.UserRole + 11)
+        for row in getattr(self, "current_market_rows", []):
+            try:
+                if int(row["item_id"] or 0) == int(item_id or 0) and (None if row["grade"] is None else int(row["grade"])) == grade:
+                    return row
+            except Exception:
+                continue
+        return None
+
+    def update_market_terminal_details(self):
+        if not hasattr(self, "market_item_name"):
+            return
+        row = self._selected_market_row_data()
+        if not row:
+            self.market_item_name.setText("Select an item")
+            self.market_item_meta.setText("Market details will appear here.")
+            for card in [self.market_stat_current, self.market_stat_average, self.market_stat_supply, self.market_stat_profit]:
+                card.set_value("—")
+            self.market_history_graph.set_points([])
+            self.market_item_image.clear()
+            return
+        item_id = int(row["item_id"] or 0)
+        grade = "No Grade" if row["grade"] is None else f"Grade {row['grade']}"
+        self.market_item_name.setText(str(row["name"] or "Item").upper())
+        self.market_item_meta.setText(f"{row['category']} • {grade} • Last updated {row['last_seen'] or '—'}")
+        self.market_stat_current.set_value(fmt_price(row["low_price"]), "Lowest observed")
+        self.market_stat_average.set_value(fmt_price(row["avg_price"]), "Average observed")
+        self.market_stat_supply.set_value(str(row["seen_count"] or 0), "Recorded listings")
+        profit = int(row["high_price"] or 0) - int(row["low_price"] or 0)
+        self.market_stat_profit.set_value(fmt_price(profit), "High minus low")
+        catalog_rows = [r for r in db.list_catalog(row["name"], row["category"]) if int(r["id"]) == item_id]
+        if catalog_rows:
+            pix = catalog_image_pixmap(catalog_rows[0]["image_path"] if "image_path" in catalog_rows[0].keys() else "", 210)
+            self.market_item_image.setPixmap(pix)
+        history = db.price_history(item_id)
+        self.market_history_graph.set_points([int(h["price"] or 0) for h in history])
+        watch = self._csv_setting_values("market_watchlist")
+        fav = self._csv_setting_values("market_favorites")
+        self.market_watchlist_btn.setText("Remove Watch" if str(item_id) in watch else "Add Watchlist")
+        self.market_favorite_btn.setText("Unfavorite" if str(item_id) in fav else "Favorite")
+
+    def toggle_selected_watchlist(self):
+        row = self._selected_market_row_data()
+        if not row:
+            return
+        key = str(int(row["item_id"] or 0))
+        values = self._csv_setting_values("market_watchlist")
+        values.remove(key) if key in values else values.add(key)
+        self._set_csv_setting_values("market_watchlist", values)
+        self.update_market_terminal_details()
+
+    def toggle_selected_favorite(self):
+        row = self._selected_market_row_data()
+        if not row:
+            return
+        key = str(int(row["item_id"] or 0))
+        values = self._csv_setting_values("market_favorites")
+        values.remove(key) if key in values else values.add(key)
+        self._set_csv_setting_values("market_favorites", values)
+        self.update_market_terminal_details()
 
     def selected_market_item_id(self) -> tuple[int, str] | None:
+        row = self._selected_market_row_data() if hasattr(self, "_selected_market_row_data") else None
+        if row:
+            return int(row["item_id"] or 0), str(row["name"] or "Item")
         row_idx = self.market_table.currentRow()
         if row_idx < 0:
             return None
@@ -2078,6 +3252,71 @@ class MainWindow(QMainWindow):
         layout.addWidget(close, alignment=Qt.AlignCenter)
         dlg.exec()
 
+    def _catalog_image_count(self) -> int:
+        folder = data_dir() / "catalog_images"
+        if not folder.exists():
+            return 0
+        return sum(1 for p in folder.iterdir() if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"})
+
+    def prompt_catalog_images_if_missing(self):
+        """On launch, let users download optional catalog images from GitHub instead of bundling them."""
+        try:
+            if db.get_setting("catalog_images_prompted", "0") == "1":
+                return
+            if self._catalog_image_count() > 0:
+                return
+            db.set_setting("catalog_images_prompted", "1")
+            reply = QMessageBox.question(
+                self,
+                "Import Catalog Images",
+                "StankyTools no longer ships item catalog images, which keeps the download much smaller.\n\nImport catalog images from GitHub now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                self.import_catalog_images_from_github()
+        except Exception:
+            return
+
+    def import_catalog_images_from_github(self):
+        if getattr(self, "catalog_images_worker", None) is not None and self.catalog_images_worker.isRunning():
+            QMessageBox.information(self, "Import Running", "Catalog image import is already running.")
+            return
+        url = db.get_setting("catalog_images_zip_url", DEFAULT_CATALOG_IMAGES_ZIP_URL)
+        url, ok = QInputDialog.getText(
+            self,
+            "Import Images from GitHub",
+            "GitHub catalog_images.zip URL:",
+            text=url,
+        )
+        if not ok:
+            return
+        url = url.strip() or DEFAULT_CATALOG_IMAGES_ZIP_URL
+        db.set_setting("catalog_images_zip_url", url)
+        self.catalog_images_worker = CatalogImagesGitHubWorker(url, self)
+        self.catalog_images_worker.progress.connect(self.on_catalog_import_progress)
+        self.catalog_images_worker.finished_ok.connect(self.on_catalog_images_import_finished)
+        self.catalog_images_worker.failed.connect(self.on_catalog_import_failed)
+        if hasattr(self, "catalog_github_images_button"):
+            self.catalog_github_images_button.setEnabled(False)
+        if hasattr(self, "catalog_import_progress"):
+            self.catalog_import_progress.setRange(0, 0)
+            self.catalog_import_progress.setVisible(True)
+        self.catalog_images_worker.start()
+
+    def on_catalog_images_import_finished(self, result: dict):
+        if hasattr(self, "catalog_github_images_button"):
+            self.catalog_github_images_button.setEnabled(True)
+        if hasattr(self, "catalog_import_progress"):
+            self.catalog_import_progress.setRange(0, 1)
+            self.catalog_import_progress.setValue(1)
+            self.catalog_import_progress.setVisible(False)
+        if hasattr(self, "catalog_import_status"):
+            self.catalog_import_status.setText(f"Catalog images imported: {result.get('images', 0)}")
+        CATALOG_PIXMAP_CACHE.clear()
+        self.refresh_catalog()
+        QMessageBox.information(self, "Images Imported", f"Imported {result.get('images', 0)} catalog images from GitHub.")
+
     def import_catalog(self):
         if getattr(self, "catalog_import_worker", None) is not None and self.catalog_import_worker.isRunning():
             QMessageBox.information(self, "Import Running", "Catalog import is already running.")
@@ -2102,6 +3341,8 @@ class MainWindow(QMainWindow):
     def on_catalog_import_finished(self, result: dict):
         if hasattr(self, "catalog_import_button"):
             self.catalog_import_button.setEnabled(True)
+        if hasattr(self, "catalog_github_images_button"):
+            self.catalog_github_images_button.setEnabled(True)
         if hasattr(self, "catalog_import_progress"):
             self.catalog_import_progress.setRange(0, 1)
             self.catalog_import_progress.setValue(1)
@@ -2136,7 +3377,8 @@ class MainWindow(QMainWindow):
             return
         static_map = data_dir() / "deep_desert_map.png"
         if static_map.exists():
-            self.map_view.set_map(str(static_map))
+            if hasattr(self.map_view, "set_map"):
+                self.map_view.set_map(str(static_map))
             self.refresh_pois()
             if hasattr(self, "poi_sync_status"):
                 self.poi_sync_status.setText("Deep Desert map loaded from local tactical grid.")
@@ -2147,7 +3389,8 @@ class MainWindow(QMainWindow):
         if image_path and not image_file.is_absolute():
             image_file = data_dir().parent / image_file
         if image_path and image_file.exists():
-            self.map_view.set_map(str(image_file))
+            if hasattr(self.map_view, "set_map"):
+                self.map_view.set_map(str(image_file))
             self.refresh_pois()
             return
 
@@ -2198,6 +3441,56 @@ class MainWindow(QMainWindow):
         self.poi_table.setSortingEnabled(True)
         if hasattr(self, "map_view"):
             self.map_view.draw_pois(rows, getattr(self, "selected_poi_id_for_map", None))
+
+    def manual_sync_all_markers(self):
+        """Manual recovery sync used only from Settings."""
+        if not db.get_setting("guild_code", "").strip() or not db.get_setting("display_name", "").strip():
+            QMessageBox.information(self, "Guild Sync", "Join or create a guild before syncing map markers.")
+            return
+        if hasattr(self, "poi_sync_status"):
+            self.poi_sync_status.setText("Manual sync running: POIs, bases, and guild content...")
+        if hasattr(self, "base_sync_status"):
+            self.base_sync_status.setText("Manual sync running...")
+        QApplication.processEvents()
+        self.sync_guild_pois(show_popup=False)
+        self.sync_guild_bases(show_popup=False)
+        self.sync_guild_dashboard_content(show_errors=False)
+        if hasattr(self, "poi_sync_status"):
+            self.poi_sync_status.setText("Manual sync complete.")
+        if hasattr(self, "base_sync_status"):
+            self.base_sync_status.setText("Manual sync complete.")
+        QMessageBox.information(self, "Guild Sync", "Manual sync complete. POIs, bases, links, and news are up to date.")
+
+
+    def sync_after_news_change(self):
+        """Queue and immediately flush guild news changes after add/edit/delete."""
+        if qt_alive(getattr(self, "dashboard_sync_status", None)):
+            self.dashboard_sync_status.setText("SYNC STATUS: AUTO-SYNCING NEWS")
+        QApplication.processEvents()
+        if hasattr(self, "sync_manager"):
+            self.sync_manager.queue("news", immediate=True)
+        else:
+            self.sync_guild_dashboard_content(show_errors=False)
+
+    def sync_after_marker_change(self, marker_kind: str):
+        """Queue and immediately flush marker changes after add/edit/delete."""
+        kind = (marker_kind or "marker").lower()
+        if kind == "poi" and hasattr(self, "poi_sync_status"):
+            self.poi_sync_status.setText("Auto-syncing Deep Desert POI...")
+        elif kind == "base" and hasattr(self, "base_sync_status"):
+            self.base_sync_status.setText("Auto-syncing base marker...")
+        QApplication.processEvents()
+        if hasattr(self, "sync_manager"):
+            self.sync_manager.queue(kind, immediate=True)
+        else:
+            if kind == "poi":
+                self.sync_guild_pois(show_popup=False)
+            elif kind == "base":
+                self.sync_guild_bases(show_popup=False)
+            else:
+                self.sync_guild_pois(show_popup=False)
+                self.sync_guild_bases(show_popup=False)
+            self.sync_guild_dashboard_content(show_errors=False)
 
     def auto_sync_guild(self):
         if getattr(self, "_sync_running", False):
@@ -2346,6 +3639,16 @@ class MainWindow(QMainWindow):
             self._sync_running = False
 
 
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                self._clear_layout(child_layout)
+
     def refresh_dashboard_activity_tables(self):
         guild = db.get_setting("guild_code", "").upper()
         if hasattr(self, "dashboard_links_table"):
@@ -2356,6 +3659,15 @@ class MainWindow(QMainWindow):
                 self.dashboard_links_table.add_row([row["title"] or "Untitled", row["url"] or "", row["created_by"] or "—"])
             self.dashboard_links_table.setSortingEnabled(True)
             self.dashboard_links_table.resizeRowsToContents()
+        if hasattr(self, "dashboard_link_cards"):
+            self._clear_layout(self.dashboard_link_cards)
+            link_rows = getattr(self, "current_dashboard_links", []) or []
+            if not link_rows:
+                self.dashboard_link_cards.addWidget(LinkCard("No Helpful Links", "", "System"))
+            for row in link_rows[:4]:
+                card = LinkCard(row["title"] or "Useful Link", row["url"] or "", row["created_by"] or "—")
+                card.clicked.connect(lambda url, self=self: webbrowser.open(url) if url else None)
+                self.dashboard_link_cards.addWidget(card)
         if hasattr(self, "news_table"):
             self.news_table.setSortingEnabled(False)
             self.news_table.setRowCount(0)
@@ -2371,6 +3683,23 @@ class MainWindow(QMainWindow):
                 ])
             self.news_table.setSortingEnabled(True)
             self.news_table.resizeRowsToContents()
+        if hasattr(self, "dashboard_news_cards"):
+            self._clear_layout(self.dashboard_news_cards)
+            news_rows = getattr(self, "current_dashboard_news", []) or []
+            if not news_rows:
+                self.dashboard_news_cards.addWidget(NewsCard("No Guild News", "Create a guild post to broadcast announcements here.", "System", ""))
+            for row in news_rows[:4]:
+                self.dashboard_news_cards.addWidget(NewsCard(row["title"] or "Guild Update", row["body"] or "", row["created_by"] or "—", format_app_date(row["created_at"])))
+        if hasattr(self, "dashboard_market_movers"):
+            self._clear_layout(self.dashboard_market_movers)
+            stats = db.dashboard_stats()
+            movers = [
+                ("Catalog Coverage", fmt_price(stats.get("catalog_items", 0)), "▴"),
+                ("Deep Desert POIs", fmt_price(stats.get("pois", 0)), "◎"),
+                ("Tracked Market", "Ready", "◈"),
+            ]
+            for name, value, trend in movers:
+                self.dashboard_market_movers.addWidget(MarketMoverCard(name, value, trend))
 
     def refresh_guild_page(self):
         guild = db.get_setting("guild_code", "").upper()
@@ -2405,6 +3734,22 @@ class MainWindow(QMainWindow):
                 self.guild_page_activity.add_row([format_app_date(row["created_at"]), row["actor"] or "—", row["message"] or "—"])
             self.guild_page_activity.setSortingEnabled(True)
             self.guild_page_activity.resizeRowsToContents()
+
+        try:
+            members = getattr(self, "current_guild_members", []) or []
+            news = getattr(self, "current_guild_news", []) or db.list_guild_news(guild, 30)
+            links = getattr(self, "current_guild_links", []) or db.list_guild_links(guild, 50)
+            officer_count = sum(1 for m in members if str(m.get("role", "")).lower() in {"owner", "officer", "admin"})
+            if hasattr(self, "guild_stat_members"):
+                self.guild_stat_members.set_value(str(len(members)), "Current roster")
+            if hasattr(self, "guild_stat_officers"):
+                self.guild_stat_officers.set_value(str(officer_count), "Owner/officer roles")
+            if hasattr(self, "guild_stat_news"):
+                self.guild_stat_news.set_value(str(len(news)), "Recent announcements")
+            if hasattr(self, "guild_stat_links"):
+                self.guild_stat_links.set_value(str(len(links)), "Pinned resources")
+        except Exception:
+            pass
 
     def sync_guild_dashboard_content(self, show_errors: bool = False):
         url, key = active_supabase()
@@ -2445,6 +3790,7 @@ class MainWindow(QMainWindow):
         url, key = active_supabase()
         if not url or not key or "PASTE_" in key:
             db.add_local_guild_news(guild, title.strip(), body.strip(), db.get_setting("display_name", ""))
+            self.sync_after_news_change()
             self.refresh_guild_page()
             self.refresh_dashboard()
             return
@@ -2457,6 +3803,7 @@ class MainWindow(QMainWindow):
             }]
             supabase_request("POST", url, key, "guild_news", payload)
             self.log_guild_activity(f"posted guild news: {title.strip()}")
+            self.sync_after_news_change()
             self.refresh_guild_page()
             self.refresh_dashboard()
         except Exception as exc:
@@ -2505,13 +3852,14 @@ class MainWindow(QMainWindow):
         url, key = active_supabase()
         if rid.startswith("local-") or not url or not key or "PASTE_" in key:
             db.delete_local_guild_news(rid)
+            self.sync_after_news_change()
             self.refresh_guild_page()
             self.refresh_dashboard()
             return
         try:
             supabase_request("DELETE", url, key, f"guild_news?id=eq.{urllib.parse.quote(rid)}")
             self.log_guild_activity("deleted a guild news update")
-            self.sync_guild_dashboard_content(show_errors=False)
+            self.sync_after_news_change()
             self.refresh_guild_page()
             self.refresh_dashboard()
         except Exception as exc:
@@ -2771,7 +4119,7 @@ class MainWindow(QMainWindow):
             poi_type = current_type or "Custom"
             defeated = False
         db.update_poi(poi_id, poi_type, note, pooped_on=defeated, updated_by=db.get_setting("display_name", ""))
-        self.sync_guild_pois(show_popup=False)
+        self.sync_after_marker_change("poi")
         self.refresh_pois()
         self.refresh_dashboard()
 
@@ -2828,7 +4176,7 @@ class MainWindow(QMainWindow):
             pooped = (status_item.text().lower() == "defeated") if status_item else False
         db.update_poi(poi_id, poi_type, note, pooped_on=pooped, updated_by=db.get_setting("display_name", ""))
         self.log_guild_activity(f"updated POI: {poi_type}")
-        self.sync_guild_pois(show_popup=False)
+        self.sync_after_marker_change("poi")
         self.refresh_pois()
         self.refresh_dashboard()
 
@@ -2847,6 +4195,7 @@ class MainWindow(QMainWindow):
         self.delete_remote_poi(poi)
         db.delete_poi(poi_id)
         self.log_guild_activity("deleted a POI")
+        self.sync_after_marker_change("poi")
         self.refresh_pois()
         self.refresh_dashboard()
 
@@ -2897,7 +4246,7 @@ class MainWindow(QMainWindow):
         user = db.get_setting("display_name", "")
         db.add_poi(x, y, poi_type, note, guild_code=guild, poi_type=poi_type, created_by=user)
         self.log_guild_activity(f"added POI: {poi_type}")
-        self.sync_guild_pois(show_popup=False)
+        self.sync_after_marker_change("poi")
         self.refresh_pois()
         self.refresh_dashboard()
 
@@ -3010,7 +4359,7 @@ class MainWindow(QMainWindow):
             return
         db.add_base(x, y, base_name.strip(), seitch, guild, user)
         self.log_guild_activity(f"added base: {base_name.strip()}")
-        self.sync_guild_bases(show_popup=False)
+        self.sync_after_marker_change("base")
         self.refresh_bases()
         self.refresh_dashboard()
 
@@ -3037,7 +4386,7 @@ class MainWindow(QMainWindow):
             return
         db.update_base(base_id, base_name.strip(), seitch)
         self.log_guild_activity(f"updated base: {base_name.strip()}")
-        self.sync_guild_bases(show_popup=False)
+        self.sync_after_marker_change("base")
         self.refresh_bases()
 
     def delete_selected_base(self):
@@ -3059,6 +4408,7 @@ class MainWindow(QMainWindow):
         self.delete_remote_base(base)
         db.delete_base(base_id)
         self.log_guild_activity("deleted a base")
+        self.sync_after_marker_change("base")
         self.refresh_bases()
         self.refresh_dashboard()
 
@@ -3090,7 +4440,7 @@ class MainWindow(QMainWindow):
         status = normalize_base_status(status)
         db.update_base_status(base_id, status)
         self.log_guild_activity(f"set base status to {status}")
-        self.sync_guild_bases(show_popup=False)
+        self.sync_after_marker_change("base")
         self.refresh_bases()
 
     def _current_guild_admin(self) -> bool:
@@ -3098,21 +4448,24 @@ class MainWindow(QMainWindow):
 
     def refresh_guild_logo_widgets(self):
         guild = db.get_setting("guild_code", "").strip().upper()
+        widgets = [
+            getattr(self, "dashboard_guild_logo", None),
+            getattr(self, "settings_guild_logo", None),
+        ]
+        widgets = [label for label in widgets if qt_alive(label)]
+        if not widgets:
+            return
         if not guild:
-            for label in [getattr(self, "dashboard_guild_logo", None), getattr(self, "settings_guild_logo", None)]:
-                if label is not None:
-                    label.setPixmap(QPixmap())
-                    label.setText("NO GUILD")
+            for label in widgets:
+                label.setPixmap(QPixmap())
+                label.setText("NO GUILD")
             return
         path = guild_logo_cache_path()
         fallback = asset_path("images", "default_guild_logo.png")
         pix = QPixmap(str(path)) if path.exists() else QPixmap(str(fallback)) if fallback.exists() else QPixmap()
-        widgets = []
-        if hasattr(self, "dashboard_guild_logo"):
-            widgets.append(self.dashboard_guild_logo)
-        if hasattr(self, "settings_guild_logo"):
-            widgets.append(self.settings_guild_logo)
         for label in widgets:
+            if not qt_alive(label):
+                continue
             if not pix.isNull():
                 label.setPixmap(pix.scaled(label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 label.setText("")
@@ -3191,16 +4544,24 @@ class MainWindow(QMainWindow):
 
     def show_members_roles_dialog(self):
         """Open member/role management only when requested."""
-        rows = self.refresh_guild_members()
+        self.refresh_guild_members()
         dlg = QDialog(self)
-        dlg.setWindowTitle("Guild Members / Roles")
-        dlg.setMinimumSize(640, 460)
+        dlg.setWindowTitle("Manage Guild Members")
+        dlg.setMinimumSize(720, 500)
         layout = QVBoxLayout(dlg)
-        title = QLabel("Guild Members / Roles")
+        title = QLabel("Manage Guild Members")
         title.setObjectName("SectionTitle")
         layout.addWidget(title)
-        info = QLabel("Members are hidden from Settings until this window is opened.")
-        info.setStyleSheet("color:#9f8150;")
+        current_role = (db.get_setting("guild_role", "member") or "member").lower()
+        if current_role == "owner":
+            info_text = "Owners can promote members to officer, demote officers to member, and remove members."
+        elif current_role == "officer":
+            info_text = "Officers can remove regular members. Role promotion/demotion is owner-only."
+        else:
+            info_text = "Member management is read-only for your current role."
+        info = QLabel(info_text)
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#d6b16b; font-size:13px; font-weight:700;")
         layout.addWidget(info)
 
         table = StankyTable(["Member", "Role"])
@@ -3208,6 +4569,15 @@ class MainWindow(QMainWindow):
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         layout.addWidget(table, 1)
+
+        def selected_member():
+            row = table.currentRow()
+            if row < 0:
+                QMessageBox.information(dlg, "Guild Members", "Select a member first.")
+                return None, None
+            name_item = table.item(row, 0)
+            role_item = table.item(row, 1)
+            return (name_item.text() if name_item else ""), (role_item.text() if role_item else "member")
 
         def populate():
             fresh = self.refresh_guild_members()
@@ -3221,34 +4591,112 @@ class MainWindow(QMainWindow):
                 role_item.setData(Qt.UserRole, str(item.get("role", "member")))
                 table.setItem(r, 0, name_item)
                 table.setItem(r, 1, role_item)
+            update_buttons()
 
-        def remove_selected():
+        def update_buttons():
             row = table.currentRow()
-            if row < 0:
-                QMessageBox.information(dlg, "Guild Members", "Select a member first.")
-                return
-            name_item = table.item(row, 0)
-            role_item = table.item(row, 1)
-            member_name = name_item.text() if name_item else ""
-            member_role = (role_item.text() if role_item else "member").lower()
-            if self.remove_guild_member(member_name, member_role):
+            member_role = ""
+            member_name = ""
+            if row >= 0:
+                name_item = table.item(row, 0)
+                role_item = table.item(row, 1)
+                member_name = name_item.text() if name_item else ""
+                member_role = (role_item.text() if role_item else "member").lower()
+            owner = (db.get_setting("guild_role", "member") or "member").lower() == "owner"
+            admin = self._current_guild_admin()
+            current_name = (db.get_setting("display_name", "") or "").strip().lower()
+            selected_self = member_name.strip().lower() == current_name
+            promote.setEnabled(owner and bool(member_name) and not selected_self and member_role == "member")
+            demote.setEnabled(owner and bool(member_name) and not selected_self and member_role == "officer")
+            remove.setEnabled(admin and bool(member_name) and not selected_self and member_role != "owner")
+
+        def promote_selected():
+            member_name, member_role = selected_member()
+            if member_name and self.update_guild_member_role(member_name, member_role, "officer"):
                 populate()
 
-        populate()
+        def demote_selected():
+            member_name, member_role = selected_member()
+            if member_name and self.update_guild_member_role(member_name, member_role, "member"):
+                populate()
+
+        def remove_selected():
+            member_name, member_role = selected_member()
+            if member_name and self.remove_guild_member(member_name, member_role):
+                populate()
+
         buttons = QHBoxLayout()
         refresh = QPushButton("Refresh")
         refresh.clicked.connect(populate)
+        promote = QPushButton("Promote to Officer")
+        promote.setObjectName("PrimaryButton")
+        promote.clicked.connect(promote_selected)
+        demote = QPushButton("Demote to Member")
+        demote.clicked.connect(demote_selected)
         remove = QPushButton("Remove Selected")
         remove.clicked.connect(remove_selected)
-        remove.setEnabled(self._current_guild_admin())
         close = QPushButton("Close")
         close.clicked.connect(dlg.accept)
         buttons.addWidget(refresh)
+        buttons.addWidget(promote)
+        buttons.addWidget(demote)
         buttons.addWidget(remove)
         buttons.addStretch()
         buttons.addWidget(close)
         layout.addLayout(buttons)
+        table.itemSelectionChanged.connect(update_buttons)
+        populate()
         dlg.exec()
+
+    def update_guild_member_role(self, member_name: str, old_role: str, new_role: str) -> bool:
+        """Promote/demote a guild member. Owners can promote member->officer and demote officer->member."""
+        current_role = (db.get_setting("guild_role", "member") or "member").lower()
+        if current_role != "owner":
+            QMessageBox.warning(self, "Permission Denied", "Only the guild owner can promote or demote members.")
+            return False
+        member_name = (member_name or "").strip()
+        old_role = (old_role or "member").strip().lower()
+        new_role = (new_role or "member").strip().lower()
+        if not member_name:
+            QMessageBox.information(self, "Guild Members", "Select a member first.")
+            return False
+        if member_name.strip().lower() == (db.get_setting("display_name", "") or "").strip().lower():
+            QMessageBox.warning(self, "Guild Members", "You cannot change your own role here.")
+            return False
+        if old_role == "owner" or new_role == "owner":
+            QMessageBox.warning(self, "Guild Members", "Owner transfer is not available from this screen yet.")
+            return False
+        allowed = {("member", "officer"), ("officer", "member")}
+        if (old_role, new_role) not in allowed:
+            QMessageBox.information(self, "Guild Members", f"{member_name} is already {old_role}.")
+            return False
+        action = "promote" if new_role == "officer" else "demote"
+        if QMessageBox.question(self, "Update Role", f"{action.title()} {member_name} to {new_role}?") != QMessageBox.Yes:
+            return False
+        url, key = active_supabase()
+        guild = db.get_setting("guild_code", "").upper()
+        if not url or not key or "PASTE_" in key:
+            db.upsert_local_member(guild, member_name, new_role)
+            self.refresh_guild_members()
+            self.refresh_dashboard()
+            try:
+                self.log_guild_activity(f"{action}d {member_name} to {new_role}")
+            except Exception:
+                pass
+            return True
+        try:
+            endpoint = f"guild_members?guild_code=eq.{urllib.parse.quote(guild)}&display_name=eq.{urllib.parse.quote(member_name)}"
+            supabase_request("PATCH", url, key, endpoint, {"role": new_role})
+            self.refresh_guild_members()
+            self.refresh_dashboard()
+            try:
+                self.log_guild_activity(f"{action}d {member_name} to {new_role}")
+            except Exception:
+                pass
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Role Update Failed", str(exc))
+            return False
 
     def refresh_guild_members(self):
         url, key = active_supabase()
@@ -3400,13 +4848,13 @@ class MainWindow(QMainWindow):
 
     def update_guild_button_visibility(self):
         joined = bool(db.get_setting("guild_code", "") and db.get_setting("display_name", ""))
-        if hasattr(self, "join_guild_button"):
+        if qt_alive(getattr(self, "join_guild_button", None)):
             self.join_guild_button.setVisible(not joined)
-        if hasattr(self, "create_guild_button"):
+        if qt_alive(getattr(self, "create_guild_button", None)):
             self.create_guild_button.setVisible(not joined)
-        if hasattr(self, "leave_guild_button"):
+        if qt_alive(getattr(self, "leave_guild_button", None)):
             self.leave_guild_button.setVisible(joined)
-        if hasattr(self, "guild_status"):
+        if qt_alive(getattr(self, "guild_status", None)):
             guild_name = db.get_setting("guild_name", "Guild") or "Guild"
             user = db.get_setting("display_name", "")
             self.guild_status.setText(f"Joined: {guild_name} as {user}" if joined else "Not joined yet.")
@@ -3617,9 +5065,9 @@ class MainWindow(QMainWindow):
             db.set_setting("guild_name", guild_name)
             db.set_setting("guild_role", "owner")
             db.upsert_local_member(guild_code, display_name, "owner")
-            if hasattr(self, "guild_code"):
+            if qt_alive(getattr(self, "guild_code", None)):
                 self.guild_code.setText(guild_code)
-            if hasattr(self, "guild_role_label"):
+            if qt_alive(getattr(self, "guild_role_label", None)):
                 self.guild_role_label.setText("Role: owner")
             self.update_guild_button_visibility()
             self.refresh_guild_members()
@@ -3667,9 +5115,9 @@ class MainWindow(QMainWindow):
             db.set_setting("guild_code", guild_code)
             db.set_setting("guild_name", guild_name)
             db.set_setting("guild_role", "owner")
-            if hasattr(self, "guild_code"):
+            if qt_alive(getattr(self, "guild_code", None)):
                 self.guild_code.setText(guild_code)
-            if hasattr(self, "guild_role_label"):
+            if qt_alive(getattr(self, "guild_role_label", None)):
                 self.guild_role_label.setText("Role: owner")
             self.sync_guild_pois(show_popup=False)
             self.update_guild_button_visibility()
@@ -3677,6 +5125,13 @@ class MainWindow(QMainWindow):
             self.sync_guild_logo_from_remote()
             self.refresh_dashboard()
             QMessageBox.information(self, "Guild Created", f"Guild created. Share this code with members:\n\n{guild_code}")
+        except RuntimeError as exc:
+            if "already deleted" in str(exc):
+                self.update_guild_button_visibility()
+                self.refresh_dashboard()
+                QMessageBox.information(self, "Guild Created", "Guild was saved, and the UI was refreshed.")
+            else:
+                QMessageBox.critical(self, "Create Guild Failed", str(exc))
         except Exception as exc:
             QMessageBox.critical(self, "Create Guild Failed", str(exc))
 
@@ -3771,7 +5226,7 @@ def main() -> None:
         app.setFont(font)
     except Exception:
         pass
-    app.setStyleSheet(DUNE_QSS)
+    app.setStyleSheet(premium_qss(asset_path('backgrounds', 'sidebar_texture.png')))
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

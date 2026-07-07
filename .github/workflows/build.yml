@@ -17,7 +17,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install dependencies
         run: |
@@ -34,18 +34,21 @@ jobs:
       - name: Build Windows portable app
         shell: pwsh
         run: |
-          pyinstaller --clean --noconfirm StankyTools.spec
-
-      - name: Show release size report
-        shell: pwsh
-        run: |
-          python tools\analyze_release_size.py dist\StankyTools
+          pyinstaller --clean --noconfirm --windowed `
+            --name StankyTools `
+            --hidden-import PySide6.QtWebEngineWidgets `
+            --hidden-import PySide6.QtWebEngineCore `
+            --collect-submodules PySide6.QtCore `
+            --collect-submodules PySide6.QtGui `
+            --collect-submodules PySide6.QtWidgets `
+            --add-data "assets;assets" `
+            --add-data "data;data" `
+            main.py
 
       - name: Package portable ZIP
         shell: pwsh
         run: |
           Compress-Archive -Path dist\StankyTools\* -DestinationPath StankyTools-Windows.zip -Force
-          Get-Item StankyTools-Windows.zip | Select-Object Name,Length
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
