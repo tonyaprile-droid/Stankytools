@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import db
+from .paths import local_app_data_dir
 
 GAME8_BASE = "https://game8.co"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) StankyToolsGame8Importer/1.0"
@@ -356,7 +357,7 @@ def import_catalog(progress: Callable[[str], None] | None = None, max_items: int
 
     log("Clearing old local catalog before Game8 import...")
     db.clear_local_catalog(skip_seed=True)
-    image_dir = db.DATA_DIR / "catalog_images"
+    image_dir = local_app_data_dir() / "item_images"
     total = {"items": 0, "images": 0, "pages": 0, "errors": 0}
     page_reports = []
     for page in GAME8_IMPORT_PAGES:

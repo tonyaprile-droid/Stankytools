@@ -16,6 +16,8 @@ import time
 import zipfile
 import tempfile
 import shutil
+import html
+from datetime import datetime, date
 
 try:
     import shiboken6
@@ -61,7 +63,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import db, deep_desert, guild_config, updater
-from .paths import app_root, asset_dir, data_dir
+from .paths import app_root, asset_dir, data_dir, local_app_data_dir
 from .ui.theme import premium_qss
 from .ui.widgets.cards import CommandCard, StatusPill
 from .services.sync_manager import SyncManager
@@ -229,15 +231,93 @@ def format_app_date(value: str) -> str:
         return raw[:10] or "—"
 
 
+def format_event_central_time(value: str) -> str:
+    """Display guild event dates with the saved event time and Central-time label."""
+    raw = str(value or "").strip()
+    if not raw:
+        return "—"
+    clean = raw.replace("UTC", "").replace("Central", "").replace("CT", "").strip()
+    if "T" in clean:
+        clean = clean.replace("T", " ").split("+", 1)[0].split("Z", 1)[0].strip()
+    parts = clean.split()
+    date_part = parts[0] if parts else clean[:10]
+    time_text = ""
+    try:
+        year, month, day = date_part.split("-")[:3]
+        date_text = f"{int(month)}-{int(day)}-{int(year)}"
+    except Exception:
+        date_text = format_app_date(raw)
+    if len(parts) >= 3 and parts[2].upper() in {"AM", "PM"}:
+        time_text = f"{parts[1]} {parts[2].upper()}"
+    elif len(parts) >= 2 and ":" in parts[1]:
+        time_part = parts[1].split(".", 1)[0]
+        hhmm = time_part[:5]
+        try:
+            hour, minute = [int(x) for x in hhmm.split(":")[:2]]
+            suffix = "AM" if hour < 12 else "PM"
+            hour12 = hour % 12 or 12
+            time_text = f"{hour12}:{minute:02d} {suffix}"
+        except Exception:
+            time_text = hhmm
+    return f"{date_text} {time_text} CT" if time_text else f"{date_text} CT"
+
+
+
+
+def parse_event_central_datetime(value: str):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    clean = raw.replace("UTC", "").replace("Central", "").replace("CT", "").replace("T", " ").strip()
+    clean = clean.split("+", 1)[0].split("Z", 1)[0].strip()
+    for fmt in ("%Y-%m-%d %I:%M %p", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%m-%d-%Y %I:%M %p", "%m/%d/%Y %I:%M %p"):
+        try:
+            return datetime.strptime(clean[:len(datetime.now().strftime(fmt))] if fmt != "%Y-%m-%d" else clean[:10], fmt)
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(clean)
+    except Exception:
+        return None
+
+
+def event_timing_badge(value: str) -> str:
+    dt = parse_event_central_datetime(value)
+    if not dt:
+        return "🔵 Upcoming"
+    today = date.today()
+    if dt.date() == today:
+        return "🟢 Today"
+    if dt.date() < today:
+        return "⚫ Ended"
+    return "🔵 Upcoming"
+
+
+def event_sort_tuple(row) -> tuple:
+    raw = row["event_at"] or row["created_at"] or ""
+    dt = parse_event_central_datetime(raw) or datetime.max
+    today = date.today()
+    if dt.date() == today:
+        group = 0
+    elif dt.date() > today:
+        group = 1
+    else:
+        group = 2
+    return (group, dt)
+
 def resolve_local_path(value: str) -> Path:
-    """Resolve a path saved by StankyTools, handling absolute and project-relative values."""
-    raw = (value or "").strip()
+    """Resolve saved paths, including per-user imported item images under AppData."""
+    raw = (value or "").strip().replace("\\", "/")
     if not raw:
         return Path()
     p = Path(raw)
     if p.is_absolute():
         return p
-    return PROJECT_ROOT / p
+    if raw.startswith("item_images/") or raw.startswith("data/"):
+        appdata_candidate = local_app_data_dir() / raw
+        if appdata_candidate.exists() or raw.startswith("item_images/"):
+            return appdata_candidate
+    return PROJECT_ROOT / raw
 
 
 CATALOG_PIXMAP_CACHE: dict[tuple[str, int], QPixmap] = {}
@@ -702,7 +782,9 @@ class NewsCard(QFrame):
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
+            event.accept()
             self.doubleClicked.emit()
+            return
         super().mouseDoubleClickEvent(event)
 
 
@@ -885,7 +967,9 @@ class LinkCard(QFrame):
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
+            event.accept()
             self.doubleClicked.emit(self.url)
+            return
         super().mouseDoubleClickEvent(event)
 
 
@@ -1024,7 +1108,7 @@ class CatalogImagesGitHubWorker(QThread):
 
     def run(self):
         try:
-            target_dir = data_dir() / "catalog_images"
+            target_dir = local_app_data_dir() / "item_images"
             target_dir.mkdir(parents=True, exist_ok=True)
             self.progress.emit("Downloading catalog_images.zip from GitHub...")
             req = urllib.request.Request(self.url, headers={"User-Agent": f"StankyTools/{updater.APP_VERSION}"})
@@ -1047,7 +1131,7 @@ class CatalogImagesGitHubWorker(QThread):
                             continue
                         if Path(name).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
                             continue
-                        # Flatten to data/catalog_images to match existing database image_path values.
+                        # Flatten to AppData item_images to match existing database image_path values.
                         out = target_dir / name
                         with zf.open(info) as src, out.open("wb") as dst:
                             dst.write(src.read())
@@ -1099,6 +1183,7 @@ class NativeDeepDesertCanvas(QWidget):
     """Simple Deep Desert guild POI map canvas with native zoom, pan, and placement."""
     coordinateChanged = Signal(str)
     poiActionRequested = Signal(float, float, str)
+    markerSelected = Signal(str, int)
 
     # POI placement is normalized against the 881x883 Deep Desert grid background.
     # Hidden filters/items removed on request: House Rep, PvP, Taxi, Intel, Loot,
@@ -1464,8 +1549,21 @@ class NativeDeepDesertCanvas(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._dragging = True
             pos = event.position() if hasattr(event, "position") else event.pos()
+            hit = self._marker_at_screen(pos.x(), pos.y())
+            if hit:
+                marker_type, marker_id = hit
+                if marker_type == "poi":
+                    self.selected_custom_poi_id = marker_id
+                    self.selected_custom_base_id = None
+                elif marker_type == "base":
+                    self.selected_custom_base_id = marker_id
+                    self.selected_custom_poi_id = None
+                self.markerSelected.emit(marker_type, int(marker_id))
+                self.update()
+                event.accept()
+                return
+            self._dragging = True
             self._last_drag = QPointF(pos.x(), pos.y())
             self.setCursor(Qt.ClosedHandCursor)
         super().mousePressEvent(event)
@@ -2309,9 +2407,11 @@ class MainWindow(QMainWindow):
         self._last_auto_sync = 0.0
         self.sync_manager = SyncManager(self)
         self.guild_sync_timer = QTimer(self)
-        # Automatic polling is intentionally disabled. Guild data syncs only after
-        # the user changes something or clicks Guild Sync on the dashboard.
-        self.guild_sync_timer.setInterval(0)
+        # Lightweight polling keeps Events and Member Specializations visible on every open app.
+        # Writes still go through the debounced SyncManager; this only pulls remote updates.
+        self.guild_sync_timer.setInterval(15000)
+        self.guild_sync_timer.timeout.connect(self.pull_guild_updates)
+        self.guild_sync_timer.start()
         # Catalog image import is now handled from the Market/Catalog section, not at app startup.
 
     def notify(self, title: str, message: str = "", kind: str = "info", timeout_ms: int = 3200):
@@ -2732,6 +2832,9 @@ class MainWindow(QMainWindow):
         market_header.addWidget(market_title, 1)
         market_header.addWidget(event_add)
         market_layout.addLayout(market_header)
+        dashboard_events_note = QLabel("Times shown in Central Time (CT).")
+        dashboard_events_note.setObjectName("MutedLabel")
+        market_layout.addWidget(dashboard_events_note)
         self.dashboard_events_cards = QVBoxLayout()
         self.dashboard_events_cards.setSpacing(10)
         market_layout.addLayout(self.dashboard_events_cards)
@@ -2785,7 +2888,7 @@ class MainWindow(QMainWindow):
         # Hidden compatibility tables keep existing double-click/detail methods and refresh paths intact.
         self.dashboard_links_table = StankyTable(["Title", "URL", "Poster"])
         self.news_table = StankyTable(["Latest News", "Date"])
-        self.dashboard_events_table = StankyTable(["Event", "Date"])
+        self.dashboard_events_table = StankyTable(["Event", "Time (Central)", "Status", "Attending", "Interested"])
         self.dashboard_links_table.hide()
         self.news_table.hide()
         self.dashboard_events_table.hide()
@@ -2953,6 +3056,7 @@ class MainWindow(QMainWindow):
         self.dd_base_table = self.live_deep_desert.marker_table
         self.dd_archive_table = self.live_deep_desert.archive_table
         self.dd_archive_toggle = self.live_deep_desert.archive_toggle
+        self.map_view.markerSelected.connect(self.select_deep_desert_marker_from_map)
         self.dd_base_table.cellClicked.connect(self.center_on_deep_desert_marker)
         self.dd_base_table.cellDoubleClicked.connect(self.center_on_deep_desert_marker)
         self.dd_base_table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -3064,10 +3168,10 @@ class MainWindow(QMainWindow):
         title_block.addWidget(subtitle)
         title_block.addStretch()
 
-        role = StatusPill("Role", db.get_setting("guild_role", "member") or "member")
-        code = StatusPill("Code", db.get_setting("guild_code", "—") or "—")
-        role.setMinimumWidth(160)
-        code.setMinimumWidth(230)
+        role = StatusPill("Guild Role", db.get_setting("guild_role", "member") or "member", icon_path=str(asset_path("role_icon.png")))
+        code = StatusPill("Join Code", db.get_setting("guild_code", "—") or "—", icon_path=str(asset_path("code_icon.png")))
+        role.setMinimumWidth(320)
+        code.setMinimumWidth(390)
         role.setStyleSheet("QFrame { border: 1px solid rgba(214,174,90,0.75); border-radius: 14px; background: rgba(214,174,90,0.12); } QLabel { font-size: 18px; font-weight: 950; }")
         code.setStyleSheet("QFrame { border: 1px solid rgba(214,174,90,0.75); border-radius: 14px; background: rgba(214,174,90,0.12); } QLabel { font-size: 18px; font-weight: 950; }")
         self.guild_page_role_pill = role
@@ -3145,19 +3249,39 @@ class MainWindow(QMainWindow):
         events_title = QLabel("EVENTS")
         events_title.setObjectName("SectionTitle")
         center_layout.addWidget(events_title)
-        self.guild_page_events = StankyTable(["Event", "Date", "Read More"])
+        events_time_note = QLabel("All event times are listed in Central Time (CT).")
+        events_time_note.setObjectName("MutedLabel")
+        center_layout.addWidget(events_time_note)
+        self.guild_page_events = StankyTable(["Event", "Time (Central)", "Status", "Attending", "Interested", "Read More"])
         self.guild_page_events.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.guild_page_events.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.guild_page_events.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.guild_page_events.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.guild_page_events.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.guild_page_events.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.guild_page_events.cellDoubleClicked.connect(self.show_guild_event_detail)
         center_layout.addWidget(self.guild_page_events, 1)
         event_buttons = QHBoxLayout()
         add_event = QPushButton("Add Event")
         add_event.setObjectName("PrimaryButton")
         add_event.clicked.connect(self.submit_guild_event)
+        attending_event = QPushButton("✅ Attending")
+        attending_event.setObjectName("PrimaryButton")
+        attending_event.clicked.connect(lambda: self.set_selected_event_response("attending"))
+        interested_event = QPushButton("⭐ Interested")
+        interested_event.setObjectName("PrimaryButton")
+        interested_event.clicked.connect(lambda: self.set_selected_event_response("interested"))
+        not_attending_event = QPushButton("❌ Remove Response")
+        not_attending_event.clicked.connect(lambda: self.set_selected_event_response(""))
+        attendees_event = QPushButton("View Responses")
+        attendees_event.clicked.connect(self.show_selected_event_attendees)
         delete_event = QPushButton("Delete Selected")
         delete_event.clicked.connect(self.delete_selected_guild_event)
         event_buttons.addWidget(add_event)
+        event_buttons.addWidget(attending_event)
+        event_buttons.addWidget(interested_event)
+        event_buttons.addWidget(not_attending_event)
+        event_buttons.addWidget(attendees_event)
         event_buttons.addWidget(delete_event)
         event_buttons.addStretch()
         center_layout.addLayout(event_buttons)
@@ -3340,17 +3464,25 @@ class MainWindow(QMainWindow):
         title = QLabel(f"SPECIALIZATIONS — {display_name}")
         title.setObjectName("DialogHeader")
         layout.addWidget(title)
-        info = QLabel("Set each level from 1 to 100. Level 100 shows a star in the guild list.")
+        info = QLabel("Set each level up to 100. Level 100 shows a star in the guild list.")
         info.setWordWrap(True)
         info.setStyleSheet("color:#d8c098; font-weight:750;")
         layout.addWidget(info)
         form = QFormLayout()
         spins = {}
-        for key, label in [("combat","Combat"),("exploration","Exploration"),("crafting","Crafting"),("gathering","Gathering"),("sabotage","Sabotage")]:
+        specialization_order = [
+            ("crafting", "Crafting"),
+            ("gathering", "Gathering"),
+            ("exploration", "Exploration"),
+            ("combat", "Combat"),
+            ("sabotage", "Sabatoge"),
+        ]
+        for key, label in specialization_order:
             spin = QSpinBox()
             spin.setRange(1, 100)
             spin.setValue(int(current.get(key, 1)))
-            spin.setSuffix(" / 100")
+            # Keep the 1-100 limit, but do not show a visible "1 / 100" style suffix.
+            spin.setSuffix("")
             spins[key] = spin
             form.addRow(label, spin)
         layout.addLayout(form)
@@ -3366,11 +3498,25 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
         if dlg.exec() != QDialog.Accepted:
             return False
+        values = {
+            "combat": spins["combat"].value(),
+            "exploration": spins["exploration"].value(),
+            "crafting": spins["crafting"].value(),
+            "gathering": spins["gathering"].value(),
+            "sabotage": spins["sabotage"].value(),
+        }
         db.upsert_member_specializations(
             guild_code, display_name,
-            spins["combat"].value(), spins["exploration"].value(), spins["crafting"].value(),
-            spins["gathering"].value(), spins["sabotage"].value(),
+            values["combat"], values["exploration"], values["crafting"], values["gathering"], values["sabotage"],
         )
+        url, key = active_supabase()
+        guild = (guild_code or "").strip().upper()
+        if url and key and guild and display_name and "PASTE_" not in key:
+            try:
+                payload = [{"guild_code": guild, "display_name": display_name.strip(), **values}]
+                supabase_request("POST", url, key, "member_specializations?on_conflict=guild_code,display_name", payload)
+            except Exception as exc:
+                self.notify("Specializations Saved Locally", f"Remote sync failed and will retry: {str(exc)[:120]}", "warning", 4200)
         return True
 
     def edit_my_specializations(self):
@@ -3397,13 +3543,13 @@ class MainWindow(QMainWindow):
         header = QLabel("MEMBER SPECIALIZATIONS")
         header.setObjectName("DialogHeader")
         layout.addWidget(header)
-        table = StankyTable(["Member", "Role", "Combat", "Exploration", "Crafting", "Gathering", "Sabotage"])
+        table = StankyTable(["Member", "Role", "Crafting", "Gathering", "Exploration", "Combat", "Sabatoge"])
         table.setRowCount(len(rows))
         def fmt(v):
             v = int(v or 1)
             return f"⭐ {v}" if v >= 100 else str(v)
         for r, row in enumerate(rows):
-            vals = [row["display_name"], row["role"], fmt(row["combat"]), fmt(row["exploration"]), fmt(row["crafting"]), fmt(row["gathering"]), fmt(row["sabotage"])]
+            vals = [row["display_name"], row["role"], fmt(row["crafting"]), fmt(row["gathering"]), fmt(row["exploration"]), fmt(row["combat"]), fmt(row["sabotage"])]
             for c, value in enumerate(vals):
                 item = QTableWidgetItem(str(value))
                 if c >= 2 and str(value).startswith("⭐"):
@@ -3949,11 +4095,11 @@ class MainWindow(QMainWindow):
         # Remove all catalog artwork and catalog-only cache files from persistent user storage.
         try:
             targets = [
-                data_dir() / "catalog_images",
+                local_app_data_dir() / "item_images",
                 data_dir() / "catalog",
                 data_dir() / "catalog_cache",
                 data_dir() / "catalog_import_report.json",
-                data_dir() / "catalog_images.zip",
+                local_app_data_dir() / "item_images.zip",
             ]
             for target in targets:
                 if target.is_dir():
@@ -3963,7 +4109,7 @@ class MainWindow(QMainWindow):
                         target.unlink()
                     except Exception:
                         pass
-            img_dir = data_dir() / "catalog_images"
+            img_dir = local_app_data_dir() / "item_images"
             img_dir.mkdir(parents=True, exist_ok=True)
             (img_dir / ".gitkeep").touch(exist_ok=True)
 
@@ -3992,7 +4138,7 @@ class MainWindow(QMainWindow):
 
 
     def _catalog_image_count(self) -> int:
-        folder = data_dir() / "catalog_images"
+        folder = local_app_data_dir() / "item_images"
         if not folder.exists():
             return 0
         return sum(1 for p in folder.iterdir() if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"})
@@ -4279,6 +4425,42 @@ class MainWindow(QMainWindow):
                 self.map_view.draw_pois(active_pois, getattr(self, "selected_poi_id_for_map", None))
         finally:
             self._refreshing_deep_desert_markers = False
+
+
+    def select_deep_desert_marker_from_map(self, marker_type: str, marker_id: int):
+        """When a map marker is clicked, highlight and scroll to the matching Placed Intel row."""
+        marker_type = str(marker_type or "").lower()
+        try:
+            marker_id = int(marker_id)
+        except Exception:
+            return
+        self._selected_deep_desert_marker_type = marker_type
+        self._selected_deep_desert_marker_id = marker_id
+        if marker_type == "poi":
+            self.selected_poi_id_for_map = marker_id
+            self.selected_dd_base_id_for_map = None
+        elif marker_type == "base":
+            self.selected_dd_base_id_for_map = marker_id
+            self.selected_poi_id_for_map = None
+
+        # Redraw markers so the clicked one gets the strong selected highlight.
+        if hasattr(self, "map_view"):
+            self.map_view.draw_bases(self._active_deep_desert_bases(), getattr(self, "selected_dd_base_id_for_map", None))
+            self.map_view.draw_pois(self._active_deep_desert_pois(), getattr(self, "selected_poi_id_for_map", None))
+
+        table = getattr(self, "dd_base_table", None)
+        if table is None:
+            return
+        table.clearSelection()
+        for row in range(table.rowCount()):
+            row_type, row_id = self._deep_desert_marker_at_row(row, table)
+            if row_type == marker_type and row_id == marker_id:
+                table.selectRow(row)
+                first_item = table.item(row, 0)
+                if first_item is not None:
+                    table.scrollToItem(first_item, QTableWidget.PositionAtCenter)
+                table.setCurrentCell(row, 0)
+                return
 
     def _deep_desert_marker_at_row(self, row: int, table=None):
         table = table or getattr(self, "dd_base_table", None)
@@ -4782,6 +4964,20 @@ class MainWindow(QMainWindow):
             self.sync_guild_bases(show_popup=False)
             self.sync_guild_dashboard_content(show_errors=False)
 
+    def pull_guild_updates(self):
+        """Pull remote guild content so other users' changes appear automatically."""
+        if getattr(self, "_sync_running", False):
+            return
+        if not db.get_setting("guild_code", "").strip():
+            return
+        try:
+            self.sync_guild_dashboard_content(show_errors=False)
+            self.refresh_current_member_role()
+            self.refresh_dashboard()
+            self.refresh_guild_page()
+        except Exception:
+            pass
+
     def refresh_activity(self):
         # Guild Activity feed has been removed from the UI.
         return
@@ -4991,14 +5187,21 @@ class MainWindow(QMainWindow):
         if hasattr(self, "dashboard_events_table"):
             self.dashboard_events_table.setSortingEnabled(False)
             self.dashboard_events_table.setRowCount(0)
-            self.current_dashboard_events = db.list_guild_events(guild, 12)
+            self.current_dashboard_events = sorted(db.list_guild_events(guild, 12), key=event_sort_tuple)
             for row in self.current_dashboard_events:
                 title_body = (row["title"] or "Guild Event")
                 if row["body"]:
                     title_body += " — " + str(row["body"]).replace("\n", " ")
+                event_id = str(row["remote_id"] or "")
+                attending_count = db.event_attendance_count(event_id, guild) if event_id else 0
+                interested_count = db.event_interested_count(event_id, guild) if event_id else 0
+                when_raw = row["event_at"] or row["created_at"]
                 self.dashboard_events_table.add_row([
                     title_body,
-                    format_app_date(row["event_at"] or row["created_at"]),
+                    format_event_central_time(when_raw),
+                    event_timing_badge(when_raw),
+                    f"✅ {attending_count}",
+                    f"⭐ {interested_count}",
                 ])
             self.dashboard_events_table.setSortingEnabled(True)
             self.dashboard_events_table.resizeRowsToContents()
@@ -5009,7 +5212,7 @@ class MainWindow(QMainWindow):
                 card = NewsCard("No Events", "Create a guild event to show it here.", "", "", emphasize_date=True, truncate_body=True)
                 self.dashboard_events_cards.addWidget(card)
             for idx, row in enumerate(event_rows[:4]):
-                card = NewsCard(row["title"] or "Guild Event", row["body"] or "", "", format_app_date(row["event_at"] or row["created_at"]), emphasize_date=True, truncate_body=True)
+                card = NewsCard(row["title"] or "Guild Event", row["body"] or "", "", format_event_central_time(row["event_at"] or row["created_at"]), emphasize_date=True, truncate_body=True)
                 card.doubleClicked.connect(lambda i=idx: self.show_dashboard_event_detail(i, 0))
                 self.dashboard_events_cards.addWidget(card)
 
@@ -5079,14 +5282,22 @@ class MainWindow(QMainWindow):
         if hasattr(self, "guild_page_events"):
             self.guild_page_events.setSortingEnabled(False)
             self.guild_page_events.setRowCount(0)
-            self.current_guild_events = db.list_guild_events(guild, 30)
+            self.current_guild_events = sorted(db.list_guild_events(guild, 30), key=event_sort_tuple)
             for row in self.current_guild_events:
                 title_text = (row["title"] or "Guild Event")
                 body_text = str(row["body"] or "").replace("\n", " ")
                 if body_text and len(body_text) > 90:
                     body_text = body_text[:90].rstrip() + "..."
                 text = title_text + ((" — " + body_text) if body_text else "")
-                self.guild_page_events.add_row([text, format_app_date(row["event_at"] or row["created_at"]), "READ MORE" if row["body"] else "—"])
+                event_id = str(row["remote_id"] or "")
+                attending_count = db.event_attendance_count(event_id, guild) if event_id else 0
+                interested_count = db.event_interested_count(event_id, guild) if event_id else 0
+                me = db.get_setting("display_name", "").strip()
+                my_status = db.get_event_response_status(event_id, me, guild) if me and event_id else ""
+                att_text = ("✓ " if my_status == "attending" else "") + f"✅ {attending_count}"
+                int_text = ("✓ " if my_status == "interested" else "") + f"⭐ {interested_count}"
+                when_raw = row["event_at"] or row["created_at"]
+                self.guild_page_events.add_row([text, format_event_central_time(when_raw), event_timing_badge(when_raw), att_text, int_text, "READ MORE" if row["body"] else "—"])
             self.guild_page_events.setSortingEnabled(True)
         if hasattr(self, "guild_page_links"):
             self.guild_page_links.setSortingEnabled(False)
@@ -5140,6 +5351,20 @@ class MainWindow(QMainWindow):
             db.cache_guild_links(links, guild)
         except Exception:
             pass
+        try:
+            events = supabase_request("GET", url, key, f"guild_events?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=event_at.desc&limit=30")
+            db.cache_guild_events(events, guild)
+            attendance = supabase_request("GET", url, key, f"guild_event_attendance?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=created_at.asc")
+            db.cache_guild_event_attendance(attendance, guild)
+        except Exception as exc:
+            if show_errors:
+                QMessageBox.warning(self, "Guild Events", str(exc))
+        try:
+            specs = supabase_request("GET", url, key, f"member_specializations?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=display_name.asc")
+            db.cache_member_specializations(specs, guild)
+        except Exception as exc:
+            if show_errors:
+                QMessageBox.warning(self, "Member Specializations", str(exc))
 
     def submit_guild_news(self):
         if not self._current_guild_admin():
@@ -5207,23 +5432,105 @@ class MainWindow(QMainWindow):
             return rows[row]
         return None
 
+    def _format_event_response_body(self, event) -> str:
+        guild = db.get_setting("guild_code", "").upper()
+        event_id = str(event["remote_id"] or "") if event else ""
+        body = html.escape(event["body"] or "No details were provided.").replace("\n", "<br>")
+        created_by = html.escape((event["created_by"] or "—") if event else "—")
+        attending = db.list_event_responses(event_id, guild, "attending") if event_id else []
+        interested = db.list_event_responses(event_id, guild, "interested") if event_id else []
+
+        def bullet_list(names: list[str]) -> str:
+            if not names:
+                return "<div style='padding-left:14px;'>• None yet</div>"
+            return "".join(f"<div style='padding-left:14px;'>• {html.escape(name)}</div>" for name in names)
+
+        return (
+            f"<div style='font-size:22px; line-height:1.55;'>{body}</div>"
+            f"<div style='font-size:13px; color:#D6AE5A; margin-top:18px; font-weight:800;'>Created by: {created_by}</div>"
+            f"<div style='font-size:13px; line-height:1.35; margin-top:16px;'>"
+            f"<div style='font-weight:900; color:#F5F3ED;'>✅ Attending ({len(attending)})</div>"
+            f"{bullet_list(attending)}"
+            f"<br>"
+            f"<div style='font-weight:900; color:#F5F3ED;'>⭐ Interested ({len(interested)})</div>"
+            f"{bullet_list(interested)}"
+            f"</div>"
+        )
+
     def show_dashboard_event_detail(self, row: int, col: int):
         event = self._event_row_from_table("dashboard", row)
         if not event:
             return
         title = event["title"] or "Guild Event"
-        body = event["body"] or "No details were provided."
         when = event["event_at"] or event["created_at"] or ""
-        DetailDialog(title, body, self, meta=f"When: {format_app_date(when)}").exec()
+        DetailDialog(title, self._format_event_response_body(event), self, meta=f"When: {format_event_central_time(when)}").exec()
 
     def show_guild_event_detail(self, row: int, col: int):
         event = self._event_row_from_table("guild", row)
         if not event:
             return
         title = event["title"] or "Guild Event"
-        body = event["body"] or "No details were provided."
         when = event["event_at"] or event["created_at"] or ""
-        DetailDialog(title, body, self, meta=f"When: {format_app_date(when)}").exec()
+        DetailDialog(title, self._format_event_response_body(event), self, meta=f"When: {format_event_central_time(when)}").exec()
+
+    def show_selected_event_attendees(self):
+        row = self.guild_page_events.currentRow() if hasattr(self, "guild_page_events") else -1
+        event = self._event_row_from_table("guild", row)
+        if not event:
+            QMessageBox.information(self, "Event Responses", "Select an event first.")
+            return
+        when = event["event_at"] or event["created_at"] or ""
+        DetailDialog(event["title"] or "Event Responses", self._format_event_response_body(event), self, meta=f"When: {format_event_central_time(when)}").exec()
+
+    def set_selected_event_response(self, status: str = ""):
+        row = self.guild_page_events.currentRow() if hasattr(self, "guild_page_events") else -1
+        event = self._event_row_from_table("guild", row)
+        if not event:
+            QMessageBox.information(self, "Event Response", "Select an event first.")
+            return
+        status = (status or "").strip().lower()
+        if status not in {"attending", "interested", ""}:
+            status = ""
+        guild = db.get_setting("guild_code", "").upper()
+        display_name = db.get_setting("display_name", "").strip()
+        if not display_name:
+            display_name, ok = QInputDialog.getText(self, "Event Response", "Your guild display name:")
+            if not ok or not display_name.strip():
+                return
+            display_name = display_name.strip()
+            db.set_setting("display_name", display_name)
+        event_id = str(event["remote_id"] or "").strip()
+        if not event_id:
+            QMessageBox.warning(self, "Event Response", "This event is missing a sync id. Refresh and try again.")
+            return
+        when_raw = event["event_at"] or event["created_at"] or ""
+        if event_timing_badge(when_raw).endswith("Ended"):
+            QMessageBox.information(self, "Event Response", "This event has ended.")
+            return
+        current_status = db.get_event_response_status(event_id, display_name, guild)
+        final_status = "" if status == current_status else status
+        url, key = active_supabase()
+        try:
+            if url and key and "PASTE_" not in key and not event_id.startswith("local-event-"):
+                safe_event = urllib.parse.quote(event_id)
+                safe_guild = urllib.parse.quote(guild)
+                safe_name = urllib.parse.quote(display_name)
+                if final_status:
+                    payload = [{"event_id": event_id, "guild_code": guild, "display_name": display_name, "status": final_status}]
+                    supabase_request("POST", url, key, "guild_event_attendance?on_conflict=event_id,display_name", payload)
+                else:
+                    supabase_request("DELETE", url, key, f"guild_event_attendance?event_id=eq.{safe_event}&guild_code=eq.{safe_guild}&display_name=eq.{safe_name}")
+            db.set_local_event_response(event_id, guild, display_name, final_status)
+            self.sync_guild_dashboard_content(show_errors=False)
+            self.refresh_guild_page()
+            self.refresh_dashboard()
+            label = "Response removed." if not final_status else ("Marked attending." if final_status == "attending" else "Marked interested.")
+            self.notify("Event Response", label, "success")
+        except Exception as exc:
+            QMessageBox.critical(self, "Event Response Failed", str(exc))
+
+    def set_selected_event_attendance(self, attending: bool = True):
+        self.set_selected_event_response("attending" if attending else "")
 
     def _event_datetime_dialog(self, title_text: str = ""):
         dlg = QDialog(self)
@@ -5243,17 +5550,14 @@ class MainWindow(QMainWindow):
         when = QDateTimeEdit(QDateTime.currentDateTime().addDays(1))
         when.setCalendarPopup(True)
         when.setDisplayFormat("MM/dd/yyyy h:mm AP")
-        tz = QComboBox()
-        tz.addItems([
-            "Eastern", "Central", "Mountain", "Pacific", "Alaska", "Hawaii",
-            "Arizona", "Atlantic", "UTC",
-        ])
+        timezone_note = QLabel("Times are saved and displayed in Central Time (CT).")
+        timezone_note.setObjectName("MutedLabel")
         notes = QTextEdit()
         notes.setPlaceholderText("Event notes...")
         notes.setMinimumHeight(140)
         form.addRow("Title", name)
-        form.addRow("Date / Time", when)
-        form.addRow("US Time Zone", tz)
+        form.addRow("Date / Time (Central)", when)
+        form.addRow("", timezone_note)
         form.addRow("Notes", notes)
         layout.addLayout(form)
         buttons = QHBoxLayout()
@@ -5273,7 +5577,7 @@ class MainWindow(QMainWindow):
             self.notify("Guild Event", "Enter an event title.", "warning")
             return None
         dt_text = when.dateTime().toString("yyyy-MM-dd hh:mm AP")
-        return title_val, f"{dt_text} {tz.currentText()}", notes.toPlainText().strip()
+        return title_val, f"{dt_text} Central", notes.toPlainText().strip()
 
     def submit_guild_event(self):
         if not self._current_guild_admin():
@@ -5287,14 +5591,29 @@ class MainWindow(QMainWindow):
         if not result:
             return
         title, when, body = result
-        db.add_local_guild_event(guild, title.strip(), body.strip(), db.get_setting("display_name", ""), when.strip())
-        try:
-            self.log_guild_activity(f"added guild event: {title.strip()}")
-        except Exception:
-            pass
+        created_by = db.get_setting("display_name", "")
+        url, key = active_supabase()
+        if url and key and "PASTE_" not in key:
+            try:
+                rows = supabase_request("POST", url, key, "guild_events", [{
+                    "guild_code": guild,
+                    "title": title.strip(),
+                    "body": body.strip(),
+                    "created_by": created_by,
+                    "event_at": when.strip(),
+                }])
+                if rows:
+                    db.cache_guild_events(rows, guild)
+                self.log_guild_activity(f"added guild event: {title.strip()}")
+            except Exception as exc:
+                db.add_local_guild_event(guild, title.strip(), body.strip(), created_by, when.strip())
+                self.notify("Event Saved Locally", f"Remote sync failed and will retry: {str(exc)[:120]}", "warning", 4200)
+        else:
+            db.add_local_guild_event(guild, title.strip(), body.strip(), created_by, when.strip())
+        self.sync_guild_dashboard_content(show_errors=False)
         self.refresh_guild_page()
         self.refresh_dashboard()
-        self.queue_guild_sync("Event Added", "Guild event saved locally and queued for sync.")
+        self.queue_guild_sync("Event Added", "Guild event saved and queued for sync.")
 
     def delete_selected_guild_event(self):
         if not self._current_guild_admin():
@@ -5309,7 +5628,17 @@ class MainWindow(QMainWindow):
             return
         if QMessageBox.question(self, "Delete Guild Event", "Delete this guild event?") != QMessageBox.Yes:
             return
-        db.delete_local_guild_event(str(event["remote_id"] or ""))
+        rid = str(event["remote_id"] or "")
+        url, key = active_supabase()
+        if rid and not rid.startswith("local-event-") and url and key and "PASTE_" not in key:
+            try:
+                supabase_request("DELETE", url, key, f"guild_events?id=eq.{urllib.parse.quote(rid)}")
+                self.log_guild_activity("deleted a guild event")
+            except Exception as exc:
+                QMessageBox.critical(self, "Guild Event Failed", str(exc))
+                return
+        db.delete_local_guild_event(rid)
+        self.sync_guild_dashboard_content(show_errors=False)
         self.refresh_guild_page()
         self.refresh_dashboard()
 

@@ -515,6 +515,22 @@ def _ensure_runtime_columns(conn: sqlite3.Connection) -> None:
         )
     """)
     conn.execute("""
+        CREATE TABLE IF NOT EXISTS guild_event_attendance_cache (
+            event_id TEXT NOT NULL,
+            guild_code TEXT DEFAULT '',
+            display_name TEXT NOT NULL,
+            status TEXT DEFAULT 'attending',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(event_id, display_name)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_guild_event_attendance_event ON guild_event_attendance_cache(event_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_guild_event_attendance_guild ON guild_event_attendance_cache(guild_code)")
+    try:
+        conn.execute("ALTER TABLE guild_event_attendance_cache ADD COLUMN status TEXT DEFAULT 'attending'")
+    except Exception:
+        pass
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS guild_activity_cache (
             remote_id TEXT PRIMARY KEY,
             guild_code TEXT DEFAULT '',
@@ -1151,6 +1167,38 @@ def get_member_specializations(guild_code: str, display_name: str) -> dict:
         conn.close()
 
 
+
+
+def cache_member_specializations(rows: list[dict], guild_code: str) -> None:
+    """Replace the local specialization cache with the latest remote Supabase rows."""
+    ensure_local_guild_tables()
+    guild = (guild_code or "").strip().upper()
+    if not guild:
+        return
+    conn = connect()
+    try:
+        conn.execute("DELETE FROM member_specializations WHERE guild_code=?", (guild,))
+        for row in rows or []:
+            display_name = str(row.get("display_name") or "").strip()
+            if not display_name:
+                continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO member_specializations
+                    (guild_code, display_name, combat, exploration, crafting, gathering, sabotage, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+                """,
+                (
+                    guild, display_name,
+                    int(row.get("combat") or 1), int(row.get("exploration") or 1),
+                    int(row.get("crafting") or 1), int(row.get("gathering") or 1),
+                    int(row.get("sabotage") or 1), str(row.get("updated_at") or ""),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
 def list_member_specializations(guild_code: str = "") -> list[sqlite3.Row]:
     ensure_local_guild_tables()
     guild = (guild_code or "").strip().upper()
@@ -1278,6 +1326,143 @@ def delete_local_guild_event(remote_id: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _normal_event_status(value: str) -> str:
+    status = (value or "attending").strip().lower()
+    return status if status in {"attending", "interested"} else "attending"
+
+
+def cache_guild_event_attendance(rows: list[dict], guild_code: str) -> None:
+    guild = (guild_code or "").strip().upper()
+    conn = connect()
+    try:
+        try:
+            conn.execute("ALTER TABLE guild_event_attendance_cache ADD COLUMN status TEXT DEFAULT 'attending'")
+        except Exception:
+            pass
+        conn.execute("DELETE FROM guild_event_attendance_cache WHERE guild_code=?", (guild,))
+        for row in rows or []:
+            event_id = str(row.get("event_id") or row.get("guild_event_id") or row.get("remote_id") or "").strip()
+            display_name = str(row.get("display_name") or row.get("member_name") or "").strip()
+            status = _normal_event_status(row.get("status") or "attending")
+            if not event_id or not display_name:
+                continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO guild_event_attendance_cache
+                (event_id, guild_code, display_name, status, created_at)
+                VALUES(?, ?, ?, ?, ?)
+                """,
+                (event_id, guild, display_name, status, row.get("created_at") or ""),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_event_responses(event_id: str, guild_code: str = "", status: str = "attending") -> list[str]:
+    guild = (guild_code or "").strip().upper()
+    status = _normal_event_status(status)
+    conn = connect()
+    try:
+        if guild:
+            rows = conn.execute(
+                "SELECT display_name FROM guild_event_attendance_cache WHERE event_id=? AND guild_code=? AND status=? ORDER BY lower(display_name)",
+                ((event_id or "").strip(), guild, status),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT display_name FROM guild_event_attendance_cache WHERE event_id=? AND status=? ORDER BY lower(display_name)",
+                ((event_id or "").strip(), status),
+            ).fetchall()
+        return [r["display_name"] for r in rows]
+    finally:
+        conn.close()
+
+
+def list_event_attendees(event_id: str, guild_code: str = "") -> list[str]:
+    return list_event_responses(event_id, guild_code, "attending")
+
+
+def event_response_count(event_id: str, guild_code: str = "", status: str = "attending") -> int:
+    guild = (guild_code or "").strip().upper()
+    status = _normal_event_status(status)
+    conn = connect()
+    try:
+        if guild:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM guild_event_attendance_cache WHERE event_id=? AND guild_code=? AND status=?",
+                ((event_id or "").strip(), guild, status),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM guild_event_attendance_cache WHERE event_id=? AND status=?",
+                ((event_id or "").strip(), status),
+            ).fetchone()
+        return int(row["c"] if row else 0)
+    finally:
+        conn.close()
+
+
+def event_attendance_count(event_id: str, guild_code: str = "") -> int:
+    return event_response_count(event_id, guild_code, "attending")
+
+
+def event_interested_count(event_id: str, guild_code: str = "") -> int:
+    return event_response_count(event_id, guild_code, "interested")
+
+
+def get_event_response_status(event_id: str, display_name: str, guild_code: str = "") -> str:
+    guild = (guild_code or "").strip().upper()
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT status FROM guild_event_attendance_cache WHERE event_id=? AND guild_code=? AND lower(display_name)=lower(?) LIMIT 1",
+            ((event_id or "").strip(), guild, (display_name or "").strip()),
+        ).fetchone()
+        return _normal_event_status(row["status"]) if row else ""
+    finally:
+        conn.close()
+
+
+def is_attending_event(event_id: str, display_name: str, guild_code: str = "") -> bool:
+    return get_event_response_status(event_id, display_name, guild_code) == "attending"
+
+
+def set_local_event_response(event_id: str, guild_code: str, display_name: str, status: str = "") -> None:
+    event_id = (event_id or "").strip()
+    guild = (guild_code or "").strip().upper()
+    display_name = (display_name or "").strip()
+    status = (status or "").strip().lower()
+    if not event_id or not guild or not display_name:
+        return
+    conn = connect()
+    try:
+        try:
+            conn.execute("ALTER TABLE guild_event_attendance_cache ADD COLUMN status TEXT DEFAULT 'attending'")
+        except Exception:
+            pass
+        if status in {"attending", "interested"}:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO guild_event_attendance_cache(event_id, guild_code, display_name, status, created_at)
+                VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (event_id, guild, display_name, status),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM guild_event_attendance_cache WHERE event_id=? AND guild_code=? AND lower(display_name)=lower(?)",
+                (event_id, guild, display_name),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_local_event_attendance(event_id: str, guild_code: str, display_name: str, attending: bool = True) -> None:
+    set_local_event_response(event_id, guild_code, display_name, "attending" if attending else "")
 
 
 def clear_local_catalog(skip_seed: bool = True) -> None:

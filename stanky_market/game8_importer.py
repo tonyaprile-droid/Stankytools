@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import db
-from .paths import data_dir
+from .paths import data_dir, local_app_data_dir
 
 GAME8_RESOURCES_URL = "https://game8.co/games/Dune-Awakening/archives/524002"
 USER_AGENT = "StankyToolsGame8Importer/1.0 (+local catalog import)"
@@ -234,7 +234,7 @@ def _discover_detail_image(item: Game8Resource) -> str:
 def _download_image(item: Game8Resource, image_url: str) -> str:
     if not image_url:
         return ""
-    folder = data_dir() / "catalog_images" / "game8"
+    folder = local_app_data_dir() / "item_images" / "game8"
     folder.mkdir(parents=True, exist_ok=True)
     ext = _extension_from_url(image_url)
     target = folder / f"{_sanitize_filename(item.name)}{ext}"

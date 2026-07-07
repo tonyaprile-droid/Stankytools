@@ -54,7 +54,7 @@ class SyncManager(QObject):
                 w.sync_guild_bases(show_popup=False)
                 if hasattr(w, "base_sync_status"):
                     w.base_sync_status.setText("Base markers synced.")
-            if "all" in pending or "news" in pending or "guild" in pending:
+            if "all" in pending or "news" in pending or "guild" in pending or "events" in pending or "specializations" in pending:
                 w.sync_guild_dashboard_content(show_errors=False)
             self.last_success = time.strftime("%Y-%m-%d %H:%M:%S")
             self.statusChanged.emit("Auto-sync complete")

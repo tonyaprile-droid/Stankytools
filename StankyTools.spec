@@ -12,9 +12,10 @@ from PyInstaller.utils.hooks import collect_submodules
 project = Path.cwd()
 
 datas = []
-for folder in ("assets", "data"):
-    if (project / folder).exists():
-        datas.append((folder, folder))
+# Keep the installer small: ship UI assets only. Catalog databases/images are imported
+# by each user and saved under AppData/StankyTools, not bundled into releases.
+if (project / "assets").exists():
+    datas.append(("assets", "assets"))
 
 hiddenimports = [
     "PySide6.QtCore",

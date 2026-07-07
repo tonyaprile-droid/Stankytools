@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Iterable
 
 from . import db
-from .paths import data_dir
+from .paths import local_app_data_dir
 
 GITHUB_IMAGE_BASE_URL = "https://raw.githubusercontent.com/tonyaprile-droid/stanky-tools-assets/main/items"
-CATALOG_IMAGE_DIR = data_dir() / "catalog_images"
+CATALOG_IMAGE_DIR = local_app_data_dir() / "item_images"
 _IMAGE_EXTS = (".webp", ".png", ".jpg", ".jpeg")
 
 
@@ -69,7 +69,7 @@ def normalize_catalog_image_paths() -> None:
         name = row["name"] if "name" in row.keys() else ""
         image_path = row["image_path"] if "image_path" in row.keys() else ""
         target = catalog_cache_path(name, image_path)
-        portable = f"data/catalog_images/{target.name}"
+        portable = f"item_images/{target.name}"
         if str(image_path or "").replace("\\", "/") != portable:
             changed.append((portable, int(row["id"])))
     if not changed:
