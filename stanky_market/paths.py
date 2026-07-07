@@ -7,22 +7,27 @@ from pathlib import Path
 
 
 def app_root() -> Path:
-    """Return the writable application folder.
-
-    Development: project folder.
-    Frozen one-folder EXE: folder next to StankyTools.exe.
-    """
+    """Return the application/install folder."""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[1]
 
 
-def bundled_root() -> Path:
-    """Return where PyInstaller placed bundled read-only resources.
+def local_app_data_dir() -> Path:
+    """Return the persistent per-user data folder.
 
-    PyInstaller one-folder builds usually keep --add-data content under
-    sys._MEIPASS (often dist/StankyTools/_internal). Source runs use app_root().
+    This folder is outside the install/project directory so updates cannot
+    remove guild membership, settings, POIs, downloaded artwork, videos,
+    or the local database.
     """
+    base = os.environ.get("LOCALAPPDATA")
+    root = Path(base) / "StankyTools" if base else Path.home() / ".stankytools"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def bundled_root() -> Path:
+    """Return where PyInstaller placed bundled read-only resources."""
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
@@ -34,7 +39,7 @@ def bundled_root() -> Path:
 
 
 def resource_path(*parts: str) -> Path:
-    """Find a resource in the writable app folder first, then bundled assets."""
+    """Find a resource in install folder first, then bundled assets."""
     local = app_root().joinpath(*parts)
     if local.exists():
         return local
@@ -52,32 +57,74 @@ def bundled_data_dir() -> Path:
     return resource_path("data")
 
 
-def data_dir() -> Path:
-    """Return the data folder used by the app.
+def _copy_missing_tree(source: Path, target: Path) -> None:
+    if not source.exists():
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    for item in source.rglob("*"):
+        rel = item.relative_to(source)
+        dest = target / rel
+        if item.is_dir():
+            dest.mkdir(parents=True, exist_ok=True)
+        elif not dest.exists():
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(item, dest)
+            except Exception:
+                pass
 
-    In a frozen release, user-writable data should live next to the EXE.
-    On first launch, copy bundled seed data there so maps/images/icons/databases
-    are available outside PyInstaller's _internal folder.
+
+def migrate_legacy_user_data() -> None:
+    """Move/copy old install-folder user data to LocalAppData once.
+
+    Older builds used <install>/data and <install>/logs. That caused users
+    to lose guild membership after replacing the app folder during updates.
+    This migration preserves existing files while never overwriting newer
+    LocalAppData user files.
     """
-    target = app_root() / "data"
-    if getattr(sys, "frozen", False):
-        source = bundled_root() / "data"
+    root = local_app_data_dir()
+    marker = root / "config" / "migration_v1_complete.txt"
+    if marker.exists():
+        return
+    try:
+        for folder in ("data", "logs"):
+            legacy = app_root() / folder
+            target = root / folder
+            _copy_missing_tree(legacy, target)
+        (root / "config").mkdir(parents=True, exist_ok=True)
+        marker.write_text("ok", encoding="utf-8")
+    except Exception:
+        # Migration failure should never block launch.
+        pass
+
+
+def data_dir() -> Path:
+    """Return persistent user data folder for DBs, POIs, guild state, and caches."""
+    migrate_legacy_user_data()
+    target = local_app_data_dir() / "data"
+    target.mkdir(parents=True, exist_ok=True)
+    # Seed missing read-only defaults from bundled/project data without overwriting user files.
+    for source in (bundled_root() / "data", app_root() / "data"):
         try:
-            if source.exists():
-                target.mkdir(parents=True, exist_ok=True)
-                # Copy only missing files so user data/local caches survive updates.
-                shutil.copytree(source, target, dirs_exist_ok=True)
+            _copy_missing_tree(source, target)
         except Exception:
-            # Never prevent launch because seed data could not be copied.
             pass
-        return target
     return target
 
 
+def cache_dir() -> Path:
+    path = local_app_data_dir() / "cache"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def config_dir() -> Path:
+    path = local_app_data_dir() / "config"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def logs_dir() -> Path:
-    path = app_root() / "logs"
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    path = local_app_data_dir() / "logs"
+    path.mkdir(parents=True, exist_ok=True)
     return path

@@ -1,10 +1,8 @@
-# StankyTools cinematic Hagga/banner patch
+# StankyTools v1.0 RC2.27
 
-Copy `stanky_market/app.py` into your project and copy the `assets/` folder into the project root.
+Cumulative Dune Data Engine integration update.
 
-Changes:
-- Dune-inspired detailed page banners.
-- Hagga Basin markers are clean by default.
-- Clicking a base makes only that base eye-catching with a gold tactical highlight and label.
-- Users can only edit/delete their own bases.
-- Removed the Supabase info line and Guild Name field from Settings if present.
+- Fully integrates Gizmo3030/Dune-Awakening-API data without requiring users to run FastAPI/Uvicorn.
+- Import Dune Data checks a local running API if present, then local cloned items_data.json, then raw GitHub items_data.json, then local cache.
+- Catalog details open inside StankyTools and show description, power, crafting materials, and deep desert materials.
+- No separate API server is required for normal users.

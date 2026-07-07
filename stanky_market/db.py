@@ -4,19 +4,21 @@ import sqlite3
 from pathlib import Path
 from typing import Iterable
 
+from .paths import data_dir
+
 APP_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = APP_DIR / "data"
+DATA_DIR = data_dir()
 DB_PATH = DATA_DIR / "stanky_market.sqlite3"
 
 ALLOWED_CATEGORIES = [
-    "Refined Resources",
     "Raw Resources",
-    "Augmentations",
+    "Refined Resources",
     "Components",
-    "Utility",
-    "Vehicles",
     "Weapons",
     "Garments",
+    "Vehicles",
+    "Tools",
+    "Utility",
     "Fuel",
 ]
 CATEGORY_NORMALIZATION = {
@@ -26,12 +28,23 @@ CATEGORY_NORMALIZATION = {
     "augmentations": "Augmentations",
     "components": "Components",
     "component": "Components",
+    "unique vehicle parts": "Vehicles",
+    "vehicle parts": "Vehicles",
+    "vehicle part": "Vehicles",
     "schematics": "Utility",
-    "tools": "Utility",
+    "tool": "Tools",
+    "tools": "Tools",
+    "unique tools": "Tools",
     "modules": "Utility",
     "consumables": "Utility",
     "resources": "Raw Resources",
     "resource": "Raw Resources",
+    "raw": "Raw Resources",
+    "raw resource": "Raw Resources",
+    "raw resources": "Raw Resources",
+    "refined": "Refined Resources",
+    "refined resource": "Refined Resources",
+    "refined resources": "Refined Resources",
     "rawresources": "Raw Resources",
     "raw resources": "Raw Resources",
     "refinedresources": "Refined Resources",
@@ -73,6 +86,7 @@ CREATE TABLE IF NOT EXISTS catalog_items (
     item_type TEXT NOT NULL DEFAULT 'Item',
     source_url TEXT DEFAULT '',
     image_path TEXT DEFAULT '',
+    description TEXT DEFAULT '',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(name, category, subcategory, item_type)
 );
@@ -130,19 +144,7 @@ LEFT JOIN price_observations p ON p.item_id = c.id
 GROUP BY c.id, p.grade;
 """
 
-REFINED_RESOURCES = [
-    "Aluminum Ingot",
-    "Cobalt Paste",
-    "Copper Ingot",
-    "Duraluminum Ingot",
-    "Iron Ingot",
-    "Plastanium Ingot",
-    "Plastone",
-    "Silicone Block",
-    "Spice Melange",
-    "Steel Ingot",
-    "Stravidium Fiber",
-]
+REFINED_RESOURCES: list[str] = []
 
 
 def connect() -> sqlite3.Connection:
@@ -167,6 +169,15 @@ def normalize_existing_categories(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 def seed_catalog(conn: sqlite3.Connection) -> None:
+    # If the user deleted the local catalog, do not silently reseed default rows.
+    # This keeps Catalog truly empty until they import from GitHub/API again.
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT DEFAULT '')")
+        row = conn.execute("SELECT value FROM app_settings WHERE key='catalog_force_github_reimport'").fetchone()
+        if row and str(row[0]) == "1":
+            return
+    except Exception:
+        pass
     for name in REFINED_RESOURCES:
         conn.execute(
             """
@@ -242,7 +253,7 @@ def add_catalog_item(name: str, category: str, subcategory: str, item_type: str,
         conn.close()
 
 
-def upsert_catalog_item(name: str, category: str, subcategory: str, item_type: str, source_url: str = "", image_path: str = "") -> int:
+def upsert_catalog_item(name: str, category: str, subcategory: str, item_type: str, source_url: str = "", image_path: str = "", description: str = "", import_source: str = "") -> int:
     """Insert a catalog item or update its URL/image if it already exists."""
     name = name.strip()
     category = category.strip()
@@ -255,13 +266,15 @@ def upsert_catalog_item(name: str, category: str, subcategory: str, item_type: s
         conn.execute(
             """
             INSERT INTO catalog_items
-            (name, category, subcategory, item_type, source_url, image_path)
-            VALUES (?, ?, ?, ?, ?, ?)
+            (name, category, subcategory, item_type, source_url, image_path, description, import_source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(name, category, subcategory, item_type) DO UPDATE SET
                 source_url = CASE WHEN excluded.source_url != '' THEN excluded.source_url ELSE catalog_items.source_url END,
-                image_path = CASE WHEN excluded.image_path != '' THEN excluded.image_path ELSE catalog_items.image_path END
+                image_path = CASE WHEN excluded.image_path != '' THEN excluded.image_path ELSE catalog_items.image_path END,
+                description = CASE WHEN excluded.description != '' THEN excluded.description ELSE catalog_items.description END,
+                import_source = CASE WHEN excluded.import_source != '' THEN excluded.import_source ELSE catalog_items.import_source END
             """,
-            (name, category, subcategory, item_type, source_url.strip(), image_path.strip()),
+            (name, category, subcategory, item_type, source_url.strip(), image_path.strip(), description.strip(), import_source.strip()),
         )
         conn.commit()
         row = conn.execute(
@@ -423,6 +436,14 @@ def recent_observations(limit: int = 10) -> list[sqlite3.Row]:
 def _ensure_runtime_columns(conn: sqlite3.Connection) -> None:
     # Add columns safely for existing local databases.
     try:
+        catalog_cols = {row['name'] for row in conn.execute("PRAGMA table_info(catalog_items)").fetchall()}
+        if 'description' not in catalog_cols:
+            conn.execute("ALTER TABLE catalog_items ADD COLUMN description TEXT DEFAULT ''")
+        if 'import_source' not in catalog_cols:
+            conn.execute("ALTER TABLE catalog_items ADD COLUMN import_source TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
         poi_cols = {row['name'] for row in conn.execute("PRAGMA table_info(deep_desert_pois)").fetchall()}
         if 'guild_code' not in poi_cols:
             conn.execute("ALTER TABLE deep_desert_pois ADD COLUMN guild_code TEXT DEFAULT ''")
@@ -438,6 +459,10 @@ def _ensure_runtime_columns(conn: sqlite3.Connection) -> None:
             conn.execute("ALTER TABLE deep_desert_pois ADD COLUMN last_updated_by TEXT DEFAULT ''")
         if 'pooped_on' not in poi_cols:
             conn.execute("ALTER TABLE deep_desert_pois ADD COLUMN pooped_on INTEGER NOT NULL DEFAULT 0")
+        if 'status' not in poi_cols:
+            conn.execute("ALTER TABLE deep_desert_pois ADD COLUMN status TEXT DEFAULT 'active'")
+        if 'archived_at' not in poi_cols:
+            conn.execute("ALTER TABLE deep_desert_pois ADD COLUMN archived_at TEXT DEFAULT ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_deep_desert_pois_guild ON deep_desert_pois(guild_code)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_deep_desert_pois_remote ON deep_desert_pois(remote_id)")
         conn.execute("""
@@ -475,6 +500,17 @@ def _ensure_runtime_columns(conn: sqlite3.Connection) -> None:
             title TEXT DEFAULT '',
             body TEXT DEFAULT '',
             created_by TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS guild_events_cache (
+            remote_id TEXT PRIMARY KEY,
+            guild_code TEXT DEFAULT '',
+            title TEXT DEFAULT '',
+            body TEXT DEFAULT '',
+            created_by TEXT DEFAULT '',
+            event_at TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -712,9 +748,21 @@ def update_base(base_id: int, base_name: str, seitch: str) -> None:
         conn.close()
 
 
+def update_base_position(base_id: int, x: float, y: float) -> None:
+    conn = connect()
+    try:
+        conn.execute(
+            "UPDATE guild_bases SET x=?, y=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (float(x), float(y), int(base_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def update_base_status(base_id: int, status: str) -> None:
     status = (status or "friendly").strip().lower()
-    if status not in {"friendly", "enemy", "defeated"}:
+    if status not in {"friendly", "enemy", "defeated", "gone"}:
         status = "friendly"
     conn = connect()
     try:
@@ -815,6 +863,26 @@ def update_poi(poi_id: int, poi_type: str, note: str, pooped_on: bool = False, u
         conn.close()
 
 
+
+
+def update_poi_status(poi_id: int, status: str, updated_by: str = "") -> None:
+    clean = (status or "active").strip().lower()
+    if clean not in {"active", "friendly", "enemy", "defeated", "gone"}:
+        clean = "active"
+    archived_expr = "CURRENT_TIMESTAMP" if clean in {"defeated", "gone"} else "''"
+    conn = connect()
+    try:
+        conn.execute(
+            f"""
+            UPDATE deep_desert_pois
+            SET status=?, pooped_on=?, last_updated_by=?, archived_at={archived_expr}, updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (clean, 1 if clean == "defeated" else 0, updated_by.strip(), int(poi_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 def clear_local_guild_cache(guild_code: str = "") -> None:
     """Remove cached local guild POIs and bases.
@@ -981,6 +1049,19 @@ def ensure_local_guild_tables() -> None:
                 PRIMARY KEY (guild_code, display_name)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS member_specializations (
+                guild_code TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                combat INTEGER NOT NULL DEFAULT 1,
+                exploration INTEGER NOT NULL DEFAULT 1,
+                crafting INTEGER NOT NULL DEFAULT 1,
+                gathering INTEGER NOT NULL DEFAULT 1,
+                sabotage INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_code, display_name)
+            )
+        """)
         conn.commit()
     finally:
         conn.close()
@@ -1016,14 +1097,82 @@ def list_local_members(guild_code: str = "") -> list[sqlite3.Row]:
         conn.close()
 
 
+
+def upsert_member_specializations(guild_code: str, display_name: str, combat: int = 1, exploration: int = 1, crafting: int = 1, gathering: int = 1, sabotage: int = 1) -> None:
+    ensure_local_guild_tables()
+    guild = (guild_code or "").strip().upper()
+    name = (display_name or "").strip()
+    def clamp(value):
+        try:
+            return max(1, min(100, int(value)))
+        except Exception:
+            return 1
+    if not guild or not name:
+        return
+    conn = connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO member_specializations
+                (guild_code, display_name, combat, exploration, crafting, gathering, sabotage, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(guild_code, display_name) DO UPDATE SET
+                combat=excluded.combat, exploration=excluded.exploration, crafting=excluded.crafting,
+                gathering=excluded.gathering, sabotage=excluded.sabotage, updated_at=CURRENT_TIMESTAMP
+            """,
+            (guild, name, clamp(combat), clamp(exploration), clamp(crafting), clamp(gathering), clamp(sabotage)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_member_specializations(guild_code: str, display_name: str) -> dict:
+    ensure_local_guild_tables()
+    guild = (guild_code or "").strip().upper()
+    name = (display_name or "").strip()
+    conn = connect()
+    try:
+        row = conn.execute(
+            "SELECT combat, exploration, crafting, gathering, sabotage FROM member_specializations WHERE guild_code=? AND display_name=?",
+            (guild, name),
+        ).fetchone()
+        if not row:
+            return {"combat": 1, "exploration": 1, "crafting": 1, "gathering": 1, "sabotage": 1}
+        return {k: int(row[k] or 1) for k in ("combat", "exploration", "crafting", "gathering", "sabotage")}
+    finally:
+        conn.close()
+
+
+def list_member_specializations(guild_code: str = "") -> list[sqlite3.Row]:
+    ensure_local_guild_tables()
+    guild = (guild_code or "").strip().upper()
+    conn = connect()
+    try:
+        return conn.execute(
+            """
+            SELECT m.display_name, m.role,
+                   COALESCE(s.combat,1) AS combat, COALESCE(s.exploration,1) AS exploration,
+                   COALESCE(s.crafting,1) AS crafting, COALESCE(s.gathering,1) AS gathering,
+                   COALESCE(s.sabotage,1) AS sabotage
+            FROM local_guild_members m
+            LEFT JOIN member_specializations s ON s.guild_code=m.guild_code AND s.display_name=m.display_name
+            WHERE m.guild_code=?
+            ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'officer' THEN 1 ELSE 2 END, m.display_name COLLATE NOCASE
+            """,
+            (guild,),
+        ).fetchall()
+    finally:
+        conn.close()
+
 def remove_local_member(guild_code: str, display_name: str) -> None:
     ensure_local_guild_tables()
     conn = connect()
     try:
-        conn.execute(
-            "DELETE FROM local_guild_members WHERE guild_code=? AND display_name=?",
-            ((guild_code or "").strip().upper(), (display_name or "").strip()),
-        )
+        guild = (guild_code or "").strip().upper()
+        name = (display_name or "").strip()
+        conn.execute("DELETE FROM local_guild_members WHERE guild_code=? AND display_name=?", (guild, name))
+        conn.execute("DELETE FROM member_specializations WHERE guild_code=? AND display_name=?", (guild, name))
         conn.commit()
     finally:
         conn.close()
@@ -1053,5 +1202,93 @@ def delete_local_guild_news(remote_id: str) -> None:
     try:
         conn.execute("DELETE FROM guild_news_cache WHERE remote_id=?", ((remote_id or "").strip(),))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def cache_guild_events(rows: list[dict], guild_code: str) -> None:
+    guild = (guild_code or "").strip().upper()
+    conn = connect()
+    try:
+        conn.execute("DELETE FROM guild_events_cache WHERE guild_code=?", (guild,))
+        for row in rows or []:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO guild_events_cache
+                (remote_id, guild_code, title, body, created_by, event_at, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(row.get("id") or row.get("remote_id") or ""),
+                    guild,
+                    row.get("title") or "",
+                    row.get("body") or row.get("notes") or "",
+                    row.get("created_by") or "",
+                    row.get("event_at") or row.get("starts_at") or "",
+                    row.get("created_at") or "",
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_guild_events(guild_code: str = "", limit: int = 20) -> list[sqlite3.Row]:
+    guild = (guild_code or "").strip().upper()
+    conn = connect()
+    try:
+        return conn.execute(
+            "SELECT * FROM guild_events_cache WHERE guild_code=? ORDER BY COALESCE(NULLIF(event_at,''), created_at) DESC LIMIT ?",
+            (guild, int(limit or 20)),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def add_local_guild_event(guild_code: str, title: str, body: str, created_by: str, event_at: str = "") -> str:
+    import uuid
+    rid = "local-event-" + uuid.uuid4().hex
+    conn = connect()
+    try:
+        guild = (guild_code or "").strip().upper()
+        conn.execute(
+            """
+            INSERT INTO guild_events_cache(remote_id, guild_code, title, body, created_by, event_at, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (rid, guild, (title or "").strip(), (body or "").strip(), (created_by or "").strip(), (event_at or "").strip()),
+        )
+        conn.commit()
+        return rid
+    finally:
+        conn.close()
+
+
+def delete_local_guild_event(remote_id: str) -> None:
+    conn = connect()
+    try:
+        conn.execute("DELETE FROM guild_events_cache WHERE remote_id=?", ((remote_id or "").strip(),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def clear_local_catalog(skip_seed: bool = True) -> None:
+    """Remove every local catalog listing and dependent local market data."""
+    conn = connect()
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("DELETE FROM price_observations")
+        conn.execute("DELETE FROM catalog_items")
+        conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('catalog_items', 'price_observations')")
+        if skip_seed:
+            conn.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT DEFAULT '')")
+            conn.execute("INSERT INTO app_settings(key, value) VALUES('catalog_force_github_reimport','1') ON CONFLICT(key) DO UPDATE SET value='1'")
+            conn.execute("INSERT INTO app_settings(key, value) VALUES('catalog_imported_once','') ON CONFLICT(key) DO UPDATE SET value=''")
+        conn.commit()
+        try:
+            conn.execute("VACUUM")
+        except Exception:
+            pass
     finally:
         conn.close()
