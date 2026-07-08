@@ -144,7 +144,21 @@ PROJECT_ROOT = app_root()
 ASSETS_DIR = asset_dir()
 
 def asset_path(*parts: str) -> Path:
-    return ASSETS_DIR.joinpath(*parts)
+    """Return a bundled asset path, preferring compressed WebP when available.
+
+    Most UI art is shipped as .webp to keep releases smaller. Existing call
+    sites may still request .png names; this resolver keeps them working by
+    transparently returning the matching .webp file when the exact file is not
+    present.
+    """
+    path = ASSETS_DIR.joinpath(*parts)
+    if path.exists():
+        return path
+    if path.suffix.lower() in {".png", ".jpg", ".jpeg"}:
+        webp = path.with_suffix(".webp")
+        if webp.exists():
+            return webp
+    return path
 
 def qss_path(path: Path) -> str:
     return path.resolve().as_posix()

@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-APP_VERSION = "v0.3.12"
+APP_VERSION = "0.3.12"
 GITHUB_OWNER = "tonyaprile-droid"
 GITHUB_REPO = "Stankytools"
 RELEASES_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
