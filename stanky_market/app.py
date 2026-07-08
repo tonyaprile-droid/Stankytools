@@ -4062,43 +4062,67 @@ class MainWindow(QMainWindow):
         if not guild:
             self.notify("Specializations", "Join or create a guild first.", "warning")
             return
-        rows = db.list_member_specializations(guild)
+        try:
+            self.sync_guild_dashboard_content(show_errors=False)
+        except Exception:
+            pass
         dlg = QDialog(self)
         dlg.setWindowTitle("Member Specializations")
-        dlg.resize(860, 520)
+        dlg.resize(900, 560)
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(22, 20, 22, 20)
         header = QLabel("MEMBER SPECIALIZATIONS")
         header.setObjectName("DialogHeader")
         layout.addWidget(header)
+        note = QLabel("Levels sync automatically. Updates from other guild members refresh while this window is open.")
+        note.setObjectName("MutedLabel")
+        layout.addWidget(note)
         table = StankyTable(["Member", "Role", "Crafting", "Gathering", "Exploration", "Combat", "Sabatoge"])
-        table.setRowCount(len(rows))
+        layout.addWidget(table, 1)
+
         def fmt(v):
             v = int(v or 1)
             return f"⭐ {v}" if v >= 100 else str(v)
-        for r, row in enumerate(rows):
-            vals = [row["display_name"], row["role"], fmt(row["crafting"]), fmt(row["gathering"]), fmt(row["exploration"]), fmt(row["combat"]), fmt(row["sabotage"])]
-            for c, value in enumerate(vals):
-                item = QTableWidgetItem(str(value))
-                if c >= 2 and str(value).startswith("⭐"):
-                    item.setForeground(QColor("#D6AE5A"))
-                    item.setFont(QFont("Segoe UI", 11, QFont.Bold))
-                table.setItem(r, c, item)
+
+        def populate_table():
+            rows = db.list_member_specializations(guild)
+            table.setSortingEnabled(False)
+            table.setRowCount(len(rows))
+            for r, row in enumerate(rows):
+                vals = [row["display_name"], row["role"], fmt(row["crafting"]), fmt(row["gathering"]), fmt(row["exploration"]), fmt(row["combat"]), fmt(row["sabotage"])]
+                for c, value in enumerate(vals):
+                    item = QTableWidgetItem(str(value))
+                    if c >= 2 and str(value).startswith("⭐"):
+                        item.setForeground(QColor("#D6AE5A"))
+                        item.setFont(QFont("Segoe UI", 11, QFont.Bold))
+                    table.setItem(r, c, item)
+            table.setSortingEnabled(True)
+
+        populate_table()
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         for c in range(1, table.columnCount()):
             table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
-        layout.addWidget(table, 1)
+
+        refresh_timer = QTimer(dlg)
+        refresh_timer.setInterval(3000)
+        refresh_timer.timeout.connect(populate_table)
+        refresh_timer.start()
+
         buttons = QHBoxLayout()
         edit_mine = QPushButton("Update My Levels")
         edit_mine.setObjectName("PrimaryButton")
+        refresh = QPushButton("Refresh Now")
         close = QPushButton("Close")
         edit_mine.clicked.connect(lambda: (dlg.accept(), self.edit_my_specializations()))
+        refresh.clicked.connect(lambda: (self.sync_guild_dashboard_content(show_errors=False), populate_table()))
         close.clicked.connect(dlg.accept)
         buttons.addWidget(edit_mine)
+        buttons.addWidget(refresh)
         buttons.addStretch()
         buttons.addWidget(close)
         layout.addLayout(buttons)
         dlg.exec()
+
 
     def submit_idea_feedback(self):
         dlg = QDialog(self)
@@ -5480,8 +5504,6 @@ class MainWindow(QMainWindow):
             self.notify("Guild Sync Failed", str(exc)[:220], "error", 5200)
 
     def auto_sync_guild(self):
-        if getattr(self, "_sync_running", False):
-            return
         if not db.get_setting("guild_code", "") or not db.get_setting("display_name", ""):
             return
         now = time.monotonic()
@@ -5491,39 +5513,59 @@ class MainWindow(QMainWindow):
         if hasattr(self, "sync_manager"):
             self.sync_manager.queue("all", immediate=False)
         else:
-            self.sync_guild_pois(show_popup=False)
-            self.sync_guild_bases(show_popup=False)
+            self.sync_deep_desert_markers(show_popup=False)
             self.sync_guild_dashboard_content(show_errors=False)
 
-    def pull_guild_updates(self):
-        """Pull remote guild content so other users' changes appear automatically.
+    def sync_deep_desert_markers(self, show_popup: bool = False, refresh_ui: bool = True) -> None:
+        """Pull/push Deep Desert POIs and bases together.
 
-        Phase 3.5 accidentally narrowed the periodic pull to dashboard content only,
-        which meant Deep Desert POIs/bases stopped appearing on other clients unless
-        the user manually synced. Keep this method as the central lightweight
-        background pull for all guild-visible data.
+        This uses a marker-specific lock instead of the dashboard/content sync lock.
+        A previous update let event/member-specialization sync block the periodic
+        map pull, so other users' POIs/bases could stop appearing until a manual
+        sync. Keep marker sync independent and always repaint the Deep Desert page
+        when marker data changes.
         """
-        if getattr(self, "_sync_running", False):
+        if getattr(self, "_deep_desert_marker_sync_running", False):
             return
+        guild = db.get_setting("guild_code", "").strip()
+        if not guild:
+            return
+        self._deep_desert_marker_sync_running = True
+        try:
+            self.sync_guild_pois(show_popup=show_popup)
+            self.sync_guild_bases(show_popup=show_popup)
+        finally:
+            self._deep_desert_marker_sync_running = False
+
+        if refresh_ui:
+            try:
+                if hasattr(self, "dd_base_table") or hasattr(self, "map_view"):
+                    self.refresh_deep_desert_bases()
+                self.refresh_dashboard()
+            except Exception:
+                pass
+
+    def pull_guild_updates(self):
+        """Pull remote guild content so other users' changes appear automatically."""
         if not db.get_setting("guild_code", "").strip():
             return
         try:
-            # Pull map markers first so the Deep Desert list/canvas stays current.
-            self.sync_guild_pois(show_popup=False)
-            self.sync_guild_bases(show_popup=False)
+            self.sync_deep_desert_markers(show_popup=False, refresh_ui=True)
 
-            # Pull dashboard/guild content after markers.
-            self.sync_guild_dashboard_content(show_errors=False)
-            self.refresh_current_member_role()
+            # Pull dashboard/guild content after markers. Event/member-specialization
+            # failures should not stop map marker sync.
+            try:
+                self.sync_guild_dashboard_content(show_errors=False)
+                self.refresh_current_member_role()
+            except Exception as content_exc:
+                if hasattr(self, "dashboard_sync_status"):
+                    self.dashboard_sync_status.setText(f"SYNC STATUS: CONTENT SYNC ISSUE: {content_exc}")
 
-            # Redraw only what exists in the current window instance.
-            if hasattr(self, "dd_base_table") or hasattr(self, "map_view"):
-                self.refresh_deep_desert_bases()
             self.refresh_dashboard()
             self.refresh_guild_page()
         except Exception as exc:
             if hasattr(self, "poi_sync_status"):
-                self.poi_sync_status.setText(f"Auto-sync issue: {exc}")
+                self.poi_sync_status.setText(f"Deep Desert sync issue: {exc}")
 
     def refresh_activity(self):
         # Guild Activity feed has been removed from the UI.
@@ -5661,6 +5703,8 @@ class MainWindow(QMainWindow):
                     db.set_poi_remote_id(local_id, rid)
 
             self.refresh_pois()
+            if hasattr(self, "dd_base_table") or hasattr(self, "map_view"):
+                self.refresh_deep_desert_bases()
             self.refresh_dashboard()
             if hasattr(self, "poi_sync_status"):
                 self.poi_sync_status.setText(f"Auto-sync active. Pulled {len(remote)} POIs. Uploaded/updated {uploaded}.")
@@ -5880,6 +5924,41 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def push_pending_event_responses(self) -> None:
+        """Upload locally pending event responses/removals to Supabase and keep retrying failures."""
+        url, key = active_supabase()
+        guild = db.get_setting("guild_code", "").upper()
+        if not url or not key or not guild or "PASTE_" in key:
+            return
+        pending = db.list_pending_event_responses(guild)
+        if not pending:
+            return
+        for row in pending:
+            event_id = str(row["event_id"] or "").strip()
+            display_name = str(row["display_name"] or "").strip()
+            status = str(row["status"] or "").strip().lower()
+            if not event_id or not display_name or event_id.startswith("local-event-"):
+                continue
+            safe_event = urllib.parse.quote(event_id)
+            safe_guild = urllib.parse.quote(guild)
+            safe_name = urllib.parse.quote(display_name)
+            # Delete first prevents one-member/two-status duplicates on projects that were created
+            # before the unique event_id/display_name constraint existed.
+            supabase_request("DELETE", url, key, f"guild_event_attendance?event_id=eq.{safe_event}&guild_code=eq.{safe_guild}&display_name=eq.{safe_name}")
+            if status in {"attending", "interested"}:
+                payload = [{
+                    "event_id": event_id,
+                    "guild_code": guild,
+                    "display_name": display_name,
+                    "status": status,
+                }]
+                try:
+                    supabase_request("POST", url, key, "guild_event_attendance?on_conflict=event_id,guild_code,display_name", payload)
+                except Exception:
+                    # Backward compatibility for databases that only have event_id/display_name unique.
+                    supabase_request("POST", url, key, "guild_event_attendance?on_conflict=event_id,display_name", payload)
+            db.mark_event_response_synced(event_id, guild, display_name)
+
     def push_pending_member_specializations(self) -> None:
         """Upload locally changed member specializations, then clear their pending flag on success."""
         url, key = active_supabase()
@@ -5910,6 +5989,11 @@ class MainWindow(QMainWindow):
         guild = db.get_setting("guild_code", "").upper()
         if not url or not key or not guild:
             return
+        try:
+            self.push_pending_event_responses()
+        except Exception as exc:
+            if show_errors:
+                QMessageBox.warning(self, "Event Response Sync", str(exc))
         try:
             self.push_pending_member_specializations()
         except Exception as exc:
@@ -6127,17 +6211,13 @@ class MainWindow(QMainWindow):
         final_status = "" if status == current_status else status
         url, key = active_supabase()
         try:
-            # Save locally first so the UI updates even if the network is slow or Supabase is unavailable.
-            db.set_local_event_response(event_id, guild, display_name, final_status)
-            if url and key and "PASTE_" not in key and not event_id.startswith("local-event-"):
-                safe_event = urllib.parse.quote(event_id)
-                safe_guild = urllib.parse.quote(guild)
-                safe_name = urllib.parse.quote(display_name)
-                if final_status:
-                    payload = [{"event_id": event_id, "guild_code": guild, "display_name": display_name, "status": final_status}]
-                    supabase_request("POST", url, key, "guild_event_attendance?on_conflict=event_id,display_name", payload)
-                else:
-                    supabase_request("DELETE", url, key, f"guild_event_attendance?event_id=eq.{safe_event}&guild_code=eq.{safe_guild}&display_name=eq.{safe_name}")
+            # Save locally first so the UI updates immediately. Mark pending so failures retry.
+            db.set_local_event_response(event_id, guild, display_name, final_status, mark_pending=True)
+            try:
+                self.push_pending_event_responses()
+            except Exception:
+                # Keep the pending local response. The 15-second guild sync will retry automatically.
+                pass
             try:
                 self.sync_manager.queue("events", immediate=True)
             except Exception:
@@ -7506,6 +7586,8 @@ class MainWindow(QMainWindow):
                 for local_id, rid in pairs:
                     db.set_base_remote_id(local_id, rid)
             self.refresh_bases()
+            if hasattr(self, "dd_base_table") or hasattr(self, "map_view"):
+                self.refresh_deep_desert_bases()
             if hasattr(self, "base_sync_status"):
                 self.base_sync_status.setText(f"Base sync active. Pulled {len(remote)}. Uploaded/updated {uploaded}.")
             if show_popup:

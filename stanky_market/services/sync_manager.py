@@ -46,12 +46,16 @@ class SyncManager(QObject):
         if hasattr(w, "notify"):
             w.notify("Syncing", "Sending saved changes in the background.", "info", 1800)
         try:
-            if "all" in pending or "poi" in pending:
-                w.sync_guild_pois(show_popup=False)
+            if "all" in pending or "poi" in pending or "base" in pending:
+                if hasattr(w, "sync_deep_desert_markers"):
+                    w.sync_deep_desert_markers(show_popup=False, refresh_ui=True)
+                else:
+                    if "all" in pending or "poi" in pending:
+                        w.sync_guild_pois(show_popup=False)
+                    if "all" in pending or "base" in pending:
+                        w.sync_guild_bases(show_popup=False)
                 if hasattr(w, "poi_sync_status"):
                     w.poi_sync_status.setText("Deep Desert POIs synced.")
-            if "all" in pending or "base" in pending:
-                w.sync_guild_bases(show_popup=False)
                 if hasattr(w, "base_sync_status"):
                     w.base_sync_status.setText("Base markers synced.")
             if "all" in pending or "news" in pending or "guild" in pending or "events" in pending or "specializations" in pending:

@@ -521,7 +521,8 @@ def _ensure_runtime_columns(conn: sqlite3.Connection) -> None:
             display_name TEXT NOT NULL,
             status TEXT DEFAULT 'attending',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY(event_id, display_name)
+            sync_pending INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(event_id, guild_code, display_name)
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_guild_event_attendance_event ON guild_event_attendance_cache(event_id)")
@@ -530,6 +531,11 @@ def _ensure_runtime_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE guild_event_attendance_cache ADD COLUMN status TEXT DEFAULT 'attending'")
     except Exception:
         pass
+    try:
+        conn.execute("ALTER TABLE guild_event_attendance_cache ADD COLUMN sync_pending INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_guild_event_attendance_unique ON guild_event_attendance_cache(event_id, guild_code, display_name)")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS guild_activity_cache (
             remote_id TEXT PRIMARY KEY,
@@ -1431,33 +1437,63 @@ def delete_local_guild_event(remote_id: str) -> None:
         conn.close()
 
 
+
 def _normal_event_status(value: str) -> str:
-    status = (value or "attending").strip().lower()
-    return status if status in {"attending", "interested"} else "attending"
+    status = (value or "").strip().lower()
+    if status in {"attending", "interested"}:
+        return status
+    return ""
+
+
+def _ensure_event_attendance_columns(conn) -> None:
+    try:
+        conn.execute("ALTER TABLE guild_event_attendance_cache ADD COLUMN status TEXT DEFAULT 'attending'")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE guild_event_attendance_cache ADD COLUMN sync_pending INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_guild_event_attendance_unique ON guild_event_attendance_cache(event_id, guild_code, display_name)")
+    except Exception:
+        pass
 
 
 def cache_guild_event_attendance(rows: list[dict], guild_code: str) -> None:
+    """Refresh event response cache from Supabase while preserving unsynced local responses/removals."""
     guild = (guild_code or "").strip().upper()
     conn = connect()
     try:
-        try:
-            conn.execute("ALTER TABLE guild_event_attendance_cache ADD COLUMN status TEXT DEFAULT 'attending'")
-        except Exception:
-            pass
+        _ensure_event_attendance_columns(conn)
+        pending = conn.execute(
+            "SELECT * FROM guild_event_attendance_cache WHERE guild_code=? AND COALESCE(sync_pending,0)=1",
+            (guild,),
+        ).fetchall()
         conn.execute("DELETE FROM guild_event_attendance_cache WHERE guild_code=?", (guild,))
         for row in rows or []:
             event_id = str(row.get("event_id") or row.get("guild_event_id") or row.get("remote_id") or "").strip()
             display_name = str(row.get("display_name") or row.get("member_name") or "").strip()
-            status = _normal_event_status(row.get("status") or "attending")
+            status = _normal_event_status(row.get("status") or "attending") or "attending"
             if not event_id or not display_name:
                 continue
             conn.execute(
                 """
                 INSERT OR REPLACE INTO guild_event_attendance_cache
-                (event_id, guild_code, display_name, status, created_at)
-                VALUES(?, ?, ?, ?, ?)
+                (event_id, guild_code, display_name, status, created_at, sync_pending)
+                VALUES(?, ?, ?, ?, ?, 0)
                 """,
                 (event_id, guild, display_name, status, row.get("created_at") or ""),
+            )
+        # Re-apply pending local changes so polling/realtime pulls never wipe an unsynced click.
+        for row in pending:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO guild_event_attendance_cache
+                (event_id, guild_code, display_name, status, created_at, sync_pending)
+                VALUES(?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP), 1)
+                """,
+                (row["event_id"], row["guild_code"], row["display_name"], row["status"] or "", row["created_at"] or ""),
             )
         conn.commit()
     finally:
@@ -1466,7 +1502,7 @@ def cache_guild_event_attendance(rows: list[dict], guild_code: str) -> None:
 
 def list_event_responses(event_id: str, guild_code: str = "", status: str = "attending") -> list[str]:
     guild = (guild_code or "").strip().upper()
-    status = _normal_event_status(status)
+    status = _normal_event_status(status) or "attending"
     conn = connect()
     try:
         if guild:
@@ -1490,7 +1526,7 @@ def list_event_attendees(event_id: str, guild_code: str = "") -> list[str]:
 
 def event_response_count(event_id: str, guild_code: str = "", status: str = "attending") -> int:
     guild = (guild_code or "").strip().upper()
-    status = _normal_event_status(status)
+    status = _normal_event_status(status) or "attending"
     conn = connect()
     try:
         if guild:
@@ -1520,6 +1556,7 @@ def get_event_response_status(event_id: str, display_name: str, guild_code: str 
     guild = (guild_code or "").strip().upper()
     conn = connect()
     try:
+        _ensure_event_attendance_columns(conn)
         row = conn.execute(
             "SELECT status FROM guild_event_attendance_cache WHERE event_id=? AND guild_code=? AND lower(display_name)=lower(?) LIMIT 1",
             ((event_id or "").strip(), guild, (display_name or "").strip()),
@@ -1533,26 +1570,32 @@ def is_attending_event(event_id: str, display_name: str, guild_code: str = "") -
     return get_event_response_status(event_id, display_name, guild_code) == "attending"
 
 
-def set_local_event_response(event_id: str, guild_code: str, display_name: str, status: str = "") -> None:
+def set_local_event_response(event_id: str, guild_code: str, display_name: str, status: str = "", mark_pending: bool = False) -> None:
     event_id = (event_id or "").strip()
     guild = (guild_code or "").strip().upper()
     display_name = (display_name or "").strip()
-    status = (status or "").strip().lower()
+    status = _normal_event_status(status)
     if not event_id or not guild or not display_name:
         return
     conn = connect()
     try:
-        try:
-            conn.execute("ALTER TABLE guild_event_attendance_cache ADD COLUMN status TEXT DEFAULT 'attending'")
-        except Exception:
-            pass
+        _ensure_event_attendance_columns(conn)
         if status in {"attending", "interested"}:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO guild_event_attendance_cache(event_id, guild_code, display_name, status, created_at)
-                VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT OR REPLACE INTO guild_event_attendance_cache(event_id, guild_code, display_name, status, created_at, sync_pending)
+                VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
                 """,
-                (event_id, guild, display_name, status),
+                (event_id, guild, display_name, status, 1 if mark_pending else 0),
+            )
+        elif mark_pending:
+            # Keep a hidden pending delete row so failed remote removals retry later.
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO guild_event_attendance_cache(event_id, guild_code, display_name, status, created_at, sync_pending)
+                VALUES(?, ?, ?, '', CURRENT_TIMESTAMP, 1)
+                """,
+                (event_id, guild, display_name),
             )
         else:
             conn.execute(
@@ -1564,8 +1607,47 @@ def set_local_event_response(event_id: str, guild_code: str, display_name: str, 
         conn.close()
 
 
+def list_pending_event_responses(guild_code: str = "") -> list[sqlite3.Row]:
+    guild = (guild_code or "").strip().upper()
+    conn = connect()
+    try:
+        _ensure_event_attendance_columns(conn)
+        return conn.execute(
+            "SELECT * FROM guild_event_attendance_cache WHERE guild_code=? AND COALESCE(sync_pending,0)=1 ORDER BY created_at ASC",
+            (guild,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def mark_event_response_synced(event_id: str, guild_code: str, display_name: str) -> None:
+    event_id = (event_id or "").strip()
+    guild = (guild_code or "").strip().upper()
+    display_name = (display_name or "").strip()
+    conn = connect()
+    try:
+        _ensure_event_attendance_columns(conn)
+        row = conn.execute(
+            "SELECT status FROM guild_event_attendance_cache WHERE event_id=? AND guild_code=? AND lower(display_name)=lower(?) LIMIT 1",
+            (event_id, guild, display_name),
+        ).fetchone()
+        if row and not _normal_event_status(row["status"]):
+            conn.execute(
+                "DELETE FROM guild_event_attendance_cache WHERE event_id=? AND guild_code=? AND lower(display_name)=lower(?)",
+                (event_id, guild, display_name),
+            )
+        else:
+            conn.execute(
+                "UPDATE guild_event_attendance_cache SET sync_pending=0 WHERE event_id=? AND guild_code=? AND lower(display_name)=lower(?)",
+                (event_id, guild, display_name),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def set_local_event_attendance(event_id: str, guild_code: str, display_name: str, attending: bool = True) -> None:
-    set_local_event_response(event_id, guild_code, display_name, "attending" if attending else "")
+    set_local_event_response(event_id, guild_code, display_name, "attending" if attending else "", mark_pending=True)
 
 
 def clear_local_catalog(skip_seed: bool = True) -> None:

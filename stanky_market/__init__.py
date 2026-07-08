@@ -1,3 +1,5 @@
-"""StankyTools desktop companion."""
+"""StankyTools package."""
 
-__version__ = "0.3.12"
+from .updater import APP_VERSION
+
+__version__ = APP_VERSION
