@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QToolButton,
     QDateTimeEdit,
+    QGraphicsDropShadowEffect,
 )
 
 from . import db, deep_desert, guild_config, updater
@@ -615,6 +616,11 @@ class StankyTable(QTableWidget):
         self.horizontalHeader().setSortIndicatorShown(True)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.setShowGrid(False)
+        self.setWordWrap(False)
+        self.setAlternatingRowColors(True)
+        self.verticalHeader().setDefaultSectionSize(44)
+        self.horizontalHeader().setMinimumHeight(42)
+        self.setFocusPolicy(Qt.NoFocus)
 
     def add_row(self, values: list[Any], numeric_cols: set[int] | None = None):
         numeric_cols = numeric_cols or set()
@@ -658,6 +664,7 @@ class PremiumStatCard(QFrame):
     def __init__(self, title: str, value: str = "—", hint: str = "", tone: str = "gold"):
         super().__init__()
         self.setObjectName("PremiumStatCard")
+        apply_soft_shadow(self, blur=28, y=8, alpha=70)
         self.setMinimumHeight(132)
         self.title_label = QLabel(title.upper())
         self.title_label.setObjectName("CardTitle")
@@ -688,6 +695,7 @@ class QuickActionCard(QFrame):
     def __init__(self, icon: str, title: str, subtitle: str = ""):
         super().__init__()
         self.setObjectName("QuickActionCard")
+        apply_soft_shadow(self, blur=24, y=7, alpha=62)
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(108)
         icon_label = QLabel(icon)
@@ -722,6 +730,7 @@ class NewsCard(QFrame):
         super().__init__()
         self.setCursor(Qt.PointingHandCursor)
         self.setObjectName("NewsCard")
+        apply_soft_shadow(self, blur=22, y=6, alpha=58)
         self.setMinimumHeight(88)
         self._raw_body = body or "No details posted yet."
         self._truncate_body = bool(truncate_body)
@@ -948,6 +957,7 @@ class LinkCard(QFrame):
         super().__init__()
         self.url = str(url or "")
         self.setObjectName("NewsCard")
+        apply_soft_shadow(self, blur=22, y=6, alpha=58)
         self.setCursor(Qt.PointingHandCursor)
         self.setMinimumHeight(82)
         layout = QVBoxLayout(self)
@@ -977,6 +987,7 @@ class MarketMoverCard(QFrame):
     def __init__(self, name: str, value: str, trend: str, tone: str = "gold"):
         super().__init__()
         self.setObjectName("MarketMoverCard")
+        apply_soft_shadow(self, blur=22, y=6, alpha=58)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
@@ -1534,6 +1545,35 @@ class NativeDeepDesertCanvas(QWidget):
     def _draw_status_overlay(self, painter: QPainter, visible_count: int):
         # Removed for a cleaner, user-friendly Deep Desert map.
         return
+
+    def _marker_at_screen(self, px: float, py: float):
+        """Return ("poi"|"base", id) when the user clicks a visible guild marker."""
+        best_hit = None
+        best_dist = 999999.0
+
+        for base in list(self.custom_bases or []):
+            try:
+                marker_id = int(base["id"] if "id" in base.keys() else base.get("id"))
+                sx, sy = self._screen_point(float(base["x"]), float(base["y"]))
+            except Exception:
+                continue
+            dist = ((float(px) - sx) ** 2 + (float(py) - sy) ** 2) ** 0.5
+            if dist <= 34 and dist < best_dist:
+                best_dist = dist
+                best_hit = ("base", marker_id)
+
+        for poi in list(self.custom_pois or []):
+            try:
+                marker_id = int(poi["id"] if "id" in poi.keys() else poi.get("id"))
+                sx, sy = self._screen_point(float(poi["x"]), float(poi["y"]))
+            except Exception:
+                continue
+            dist = ((float(px) - sx) ** 2 + (float(py) - sy) ** 2) ** 0.5
+            if dist <= 30 and dist < best_dist:
+                best_dist = dist
+                best_hit = ("poi", marker_id)
+
+        return best_hit
 
     def _draw_hover_box(self, painter: QPainter):
         painter.save()
@@ -2278,11 +2318,40 @@ def poi_status_color(status: str) -> QColor:
     return QColor(POI_STATUS_COLORS.get((status or "active").strip().lower(), POI_STATUS_COLORS["active"]))
 
 
+
+
+def apply_soft_shadow(widget, *, blur: int = 30, y: int = 10, alpha: int = 80) -> None:
+    """Apply the shared soft card shadow used by the polished UI pass.
+
+    The helper is intentionally defensive because some widgets are recreated
+    during guild refreshes and should never crash the app if Qt has already
+    cleaned up the native object.
+    """
+    if not qt_alive(widget):
+        return
+    try:
+        effect = QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(blur)
+        effect.setOffset(0, y)
+        effect.setColor(QColor(0, 0, 0, alpha))
+        widget.setGraphicsEffect(effect)
+    except Exception:
+        pass
+
 def role_can_manage_guild() -> bool:
     return (db.get_setting("guild_role", "member") or "member").lower() in {"owner", "officer"}
 
 
-def guild_logo_cache_path() -> Path:
+def guild_logo_cache_path(guild_code: str | None = None) -> Path:
+    """Return a per-guild logo cache path so multiple guilds do not overwrite each other."""
+    guild = (guild_code or db.get_setting("guild_code", "") or "").strip().upper()
+    safe = "".join(ch for ch in guild if ch.isalnum() or ch in {"-", "_"})
+    if safe:
+        return data_dir() / f"guild_logo_{safe}.png"
+    return data_dir() / "guild_logo.png"
+
+
+def legacy_guild_logo_cache_path() -> Path:
     return data_dir() / "guild_logo.png"
 
 
@@ -2337,6 +2406,7 @@ class ToastNotification(QFrame):
     def __init__(self, parent: QWidget, title: str, message: str = "", kind: str = "info"):
         super().__init__(parent)
         self.setObjectName("ToastNotification")
+        apply_soft_shadow(self, blur=36, y=12, alpha=100)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.ToolTip)
         self.setAttribute(Qt.WA_StyledBackground, True)
         colors = {
@@ -2502,11 +2572,11 @@ class MainWindow(QMainWindow):
         self.guild_page_index = 4
 
         nav_specs = [
+            ("Guild Admin", "nav_guild_admin.png", lambda checked=False: self.open_guild_admin_page(), 4),
             ("Dashboard", "nav_dashboard.png", lambda checked=False: self.set_page(0), 0),
             ("Database", "nav_auction_house.png", lambda checked=False: self.set_page(1), 1),
             ("Deep Desert", "nav_deep_desert.png", lambda checked=False: self.set_page(2), 2),
             ("Hagga Basin", "nav_hagga_basin.png", lambda checked=False: self.set_page(3), 3),
-            ("Guild Admin", "nav_guild_admin.png", lambda checked=False: self.open_guild_admin_page(), 4),
             ("Settings", "nav_settings.png", lambda checked=False: self.set_page(5), 5),
         ]
         for label, image_name, callback, page_index in nav_specs:
@@ -3134,7 +3204,7 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_guild_page(self) -> QWidget:
-        page, layout = self._page_shell("Guild Command", "Roster, command updates, links, and officer operations.")
+        page, layout = self._page_shell("Guild Command", "Events, announcements, helpful links, roster, and officer operations.")
 
         banner = QFrame()
         banner.setObjectName("HeroBanner")
@@ -3182,77 +3252,49 @@ class MainWindow(QMainWindow):
         banner_layout.addWidget(code)
         layout.addWidget(banner)
 
-        stats = QHBoxLayout()
-        self.guild_stat_members = PremiumStatCard("Members", "—", "Roster size")
-        self.guild_stat_officers = PremiumStatCard("Officers", "—", "Command staff")
-        self.guild_stat_news = PremiumStatCard("Announcements", "—", "Guild news posts")
-        self.guild_stat_links = PremiumStatCard("Helpful Links", "—", "Pinned resources")
-        stats.addWidget(self.guild_stat_members)
-        stats.addWidget(self.guild_stat_officers)
-        stats.addWidget(self.guild_stat_news)
-        stats.addWidget(self.guild_stat_links)
-        layout.addLayout(stats)
+        admin_actions = QHBoxLayout()
+        admin_actions.setSpacing(10)
+        guild_roster = QPushButton("View Roster")
+        guild_roster.setObjectName("PrimaryButton")
+        guild_roster.clicked.connect(self.show_members_roles_dialog)
+        guild_add_event = QPushButton("Add Event")
+        guild_add_event.setObjectName("PrimaryButton")
+        guild_add_event.clicked.connect(self.submit_guild_event)
+        guild_add_announcement = QPushButton("Add Announcement")
+        guild_add_announcement.setObjectName("PrimaryButton")
+        guild_add_announcement.clicked.connect(self.submit_guild_news)
+        guild_add_link = QPushButton("Add Helpful Link")
+        guild_add_link.setObjectName("PrimaryButton")
+        guild_add_link.clicked.connect(self.add_guild_link)
+        guild_upload_logo = QPushButton("Upload Logo")
+        guild_upload_logo.clicked.connect(self.upload_guild_logo)
+        admin_actions.addWidget(guild_roster)
+        admin_actions.addWidget(guild_add_event)
+        admin_actions.addWidget(guild_add_announcement)
+        admin_actions.addWidget(guild_add_link)
+        admin_actions.addWidget(guild_upload_logo)
+        admin_actions.addStretch()
+        layout.addLayout(admin_actions)
 
-        body = QHBoxLayout()
-        body.setSpacing(14)
+        tabs = QTabWidget()
+        tabs.setObjectName("GuildAdminTabs")
 
-        left_panel = QFrame()
-        left_panel.setObjectName("Panel")
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(16, 16, 16, 16)
-        left_layout.setSpacing(10)
-        members_title = QLabel("ROSTER")
-        members_title.setObjectName("SectionTitle")
-        left_layout.addWidget(members_title)
-        self.guild_page_members = StankyTable(["Member", "Role"])
-        self.guild_page_members.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.guild_page_members.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        left_layout.addWidget(self.guild_page_members, 1)
-        manage_members = QPushButton("Manage Members")
-        manage_members.setObjectName("PrimaryButton")
-        manage_members.clicked.connect(self.show_members_roles_dialog)
-        left_layout.addWidget(manage_members)
-        logo_actions = QHBoxLayout()
-        upload_logo = QPushButton("Upload Logo")
-        upload_logo.clicked.connect(self.upload_guild_logo)
-        delete_logo = QPushButton("Delete Logo")
-        delete_logo.clicked.connect(self.delete_guild_logo)
-        logo_actions.addWidget(upload_logo)
-        logo_actions.addWidget(delete_logo)
-        left_layout.addLayout(logo_actions)
-
-        center_panel = QFrame()
-        center_panel.setObjectName("Panel")
-        center_layout = QVBoxLayout(center_panel)
-        center_layout.setContentsMargins(16, 16, 16, 16)
-        center_layout.setSpacing(10)
-        news_title = QLabel("GUILD ANNOUNCEMENTS")
-        news_title.setObjectName("SectionTitle")
-        center_layout.addWidget(news_title)
-        self.guild_page_news = StankyTable(["Announcement", "Date", "Read More"])
-        self.guild_page_news.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.guild_page_news.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.guild_page_news.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.guild_page_news.cellDoubleClicked.connect(self.show_guild_news_detail)
-        center_layout.addWidget(self.guild_page_news, 1)
-        news_buttons = QHBoxLayout()
-        add_news = QPushButton("Post Update")
-        add_news.setObjectName("PrimaryButton")
-        add_news.clicked.connect(self.submit_guild_news)
-        delete_news = QPushButton("Delete Selected")
-        delete_news.clicked.connect(self.delete_selected_guild_news)
-        news_buttons.addWidget(add_news)
-        news_buttons.addWidget(delete_news)
-        news_buttons.addStretch()
-        center_layout.addLayout(news_buttons)
-
+        # EVENTS TAB
+        events_panel = QFrame()
+        events_panel.setObjectName("Panel")
+        events_layout = QVBoxLayout(events_panel)
+        events_layout.setContentsMargins(18, 18, 18, 18)
+        events_layout.setSpacing(12)
         events_title = QLabel("EVENTS")
         events_title.setObjectName("SectionTitle")
-        center_layout.addWidget(events_title)
-        events_time_note = QLabel("All event times are listed in Central Time (CT).")
+        events_layout.addWidget(events_title)
+        events_time_note = QLabel("All event times are listed in Central Time (CT). Right-click an event to mark Attending, Interested, remove your response, view responses, or open details.")
         events_time_note.setObjectName("MutedLabel")
-        center_layout.addWidget(events_time_note)
+        events_time_note.setWordWrap(True)
+        events_layout.addWidget(events_time_note)
         self.guild_page_events = StankyTable(["Event", "Time (Central)", "Status", "Attending", "Interested", "Read More"])
+        self.guild_page_events.setWordWrap(True)
+        self.guild_page_events.verticalHeader().setDefaultSectionSize(66)
         self.guild_page_events.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.guild_page_events.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.guild_page_events.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -3260,18 +3302,23 @@ class MainWindow(QMainWindow):
         self.guild_page_events.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.guild_page_events.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.guild_page_events.cellDoubleClicked.connect(self.show_guild_event_detail)
-        center_layout.addWidget(self.guild_page_events, 1)
+        self.guild_page_events.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.guild_page_events.customContextMenuRequested.connect(self.show_guild_event_context_menu)
+        events_layout.addWidget(self.guild_page_events, 1)
         event_buttons = QHBoxLayout()
         add_event = QPushButton("Add Event")
         add_event.setObjectName("PrimaryButton")
         add_event.clicked.connect(self.submit_guild_event)
         attending_event = QPushButton("✅ Attending")
+        attending_event.setToolTip("Mark yourself as attending this guild event")
         attending_event.setObjectName("PrimaryButton")
         attending_event.clicked.connect(lambda: self.set_selected_event_response("attending"))
         interested_event = QPushButton("⭐ Interested")
+        interested_event.setToolTip("Mark yourself as interested without committing")
         interested_event.setObjectName("PrimaryButton")
         interested_event.clicked.connect(lambda: self.set_selected_event_response("interested"))
         not_attending_event = QPushButton("❌ Remove Response")
+        not_attending_event.setToolTip("Clear your event response")
         not_attending_event.clicked.connect(lambda: self.set_selected_event_response(""))
         attendees_event = QPushButton("View Responses")
         attendees_event.clicked.connect(self.show_selected_event_attendees)
@@ -3284,49 +3331,111 @@ class MainWindow(QMainWindow):
         event_buttons.addWidget(attendees_event)
         event_buttons.addWidget(delete_event)
         event_buttons.addStretch()
-        center_layout.addLayout(event_buttons)
+        events_layout.addLayout(event_buttons)
+        tabs.addTab(events_panel, "Events")
 
-        right_panel = QFrame()
-        right_panel.setObjectName("Panel")
-        right_panel.setMinimumWidth(420)
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(16, 16, 16, 16)
-        right_layout.setSpacing(10)
+        # ANNOUNCEMENTS TAB
+        news_panel = QFrame()
+        news_panel.setObjectName("Panel")
+        news_layout = QVBoxLayout(news_panel)
+        news_layout.setContentsMargins(18, 18, 18, 18)
+        news_layout.setSpacing(12)
+        news_title = QLabel("ANNOUNCEMENTS")
+        news_title.setObjectName("SectionTitle")
+        news_layout.addWidget(news_title)
+        news_note = QLabel("Post guild announcements for every member. Double-click or right-click an announcement to read it.")
+        news_note.setObjectName("MutedLabel")
+        news_note.setWordWrap(True)
+        news_layout.addWidget(news_note)
+        self.guild_page_news = StankyTable(["Announcement", "Posted", "Read More"])
+        self.guild_page_news.setWordWrap(True)
+        self.guild_page_news.verticalHeader().setDefaultSectionSize(62)
+        self.guild_page_news.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.guild_page_news.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.guild_page_news.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.guild_page_news.cellDoubleClicked.connect(self.show_guild_news_detail)
+        self.guild_page_news.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.guild_page_news.customContextMenuRequested.connect(self.show_guild_news_context_menu)
+        news_layout.addWidget(self.guild_page_news, 1)
+        news_buttons = QHBoxLayout()
+        add_news = QPushButton("Add Announcement")
+        add_news.setObjectName("PrimaryButton")
+        add_news.clicked.connect(self.submit_guild_news)
+        read_news = QPushButton("Open Selected")
+        read_news.clicked.connect(lambda: self.show_guild_news_detail(self.guild_page_news.currentRow(), 0))
+        delete_news = QPushButton("Delete Selected")
+        delete_news.clicked.connect(self.delete_selected_guild_news)
+        news_buttons.addWidget(add_news)
+        news_buttons.addWidget(read_news)
+        news_buttons.addWidget(delete_news)
+        news_buttons.addStretch()
+        news_layout.addLayout(news_buttons)
+        tabs.addTab(news_panel, "Announcements")
 
+        # HELPFUL LINKS TAB
+        links_panel = QFrame()
+        links_panel.setObjectName("Panel")
+        links_layout = QVBoxLayout(links_panel)
+        links_layout.setContentsMargins(18, 18, 18, 18)
+        links_layout.setSpacing(12)
         links_title = QLabel("HELPFUL LINKS")
         links_title.setObjectName("SectionTitle")
-        right_layout.addWidget(links_title)
-        self.guild_page_links = StankyTable(["Title", "URL", "Poster"])
+        links_layout.addWidget(links_title)
+        links_note = QLabel("Pinned guild resources, maps, spreadsheets, builds, Discord posts, or other useful links.")
+        links_note.setObjectName("MutedLabel")
+        links_note.setWordWrap(True)
+        links_layout.addWidget(links_note)
+        self.guild_page_links = StankyTable(["Title", "URL", "Added By"])
+        self.guild_page_links.setWordWrap(True)
+        self.guild_page_links.verticalHeader().setDefaultSectionSize(58)
         self.guild_page_links.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.guild_page_links.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.guild_page_links.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.guild_page_links.cellDoubleClicked.connect(self.open_selected_guild_link)
-        right_layout.addWidget(self.guild_page_links, 1)
+        self.guild_page_links.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.guild_page_links.customContextMenuRequested.connect(self.show_guild_link_context_menu)
+        links_layout.addWidget(self.guild_page_links, 1)
         link_buttons = QHBoxLayout()
-        add_link = QPushButton("Add")
+        add_link = QPushButton("Add Helpful Link")
+        add_link.setObjectName("PrimaryButton")
         add_link.clicked.connect(self.add_guild_link)
-        edit_link = QPushButton("Edit")
+        open_link = QPushButton("Open Selected")
+        open_link.clicked.connect(lambda: self.open_selected_guild_link(self.guild_page_links.currentRow(), 0))
+        edit_link = QPushButton("Edit Selected")
         edit_link.clicked.connect(self.edit_guild_link)
-        delete_link = QPushButton("Delete")
+        delete_link = QPushButton("Delete Selected")
         delete_link.clicked.connect(self.delete_guild_link)
         link_buttons.addWidget(add_link)
+        link_buttons.addWidget(open_link)
         link_buttons.addWidget(edit_link)
         link_buttons.addWidget(delete_link)
-        right_layout.addLayout(link_buttons)
+        link_buttons.addStretch()
+        links_layout.addLayout(link_buttons)
+        tabs.addTab(links_panel, "Helpful Links")
 
+        # ACTIVITY TAB
+        activity_panel = QFrame()
+        activity_panel.setObjectName("Panel")
+        activity_layout = QVBoxLayout(activity_panel)
+        activity_layout.setContentsMargins(18, 18, 18, 18)
+        activity_layout.setSpacing(12)
         activity_title = QLabel("ACTIVITY")
         activity_title.setObjectName("SectionTitle")
-        right_layout.addWidget(activity_title)
+        activity_layout.addWidget(activity_title)
+        activity_note = QLabel("Recent guild changes and sync activity.")
+        activity_note.setObjectName("MutedLabel")
+        activity_note.setWordWrap(True)
+        activity_layout.addWidget(activity_note)
         self.guild_page_activity = StankyTable(["Date", "Actor", "Activity"])
+        self.guild_page_activity.setWordWrap(True)
+        self.guild_page_activity.verticalHeader().setDefaultSectionSize(52)
         self.guild_page_activity.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.guild_page_activity.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.guild_page_activity.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        right_layout.addWidget(self.guild_page_activity, 1)
+        activity_layout.addWidget(self.guild_page_activity, 1)
+        tabs.addTab(activity_panel, "Activity")
 
-        body.addWidget(left_panel, 2)
-        body.addWidget(center_panel, 4)
-        body.addWidget(right_panel, 3)
-        layout.addLayout(body, 1)
+        layout.addWidget(tabs, 1)
         QTimer.singleShot(250, self.refresh_guild_page)
         return page
 
@@ -3515,6 +3624,7 @@ class MainWindow(QMainWindow):
             try:
                 payload = [{"guild_code": guild, "display_name": display_name.strip(), **values}]
                 supabase_request("POST", url, key, "member_specializations?on_conflict=guild_code,display_name", payload)
+                db.mark_member_specializations_synced(guild, display_name.strip())
             except Exception as exc:
                 self.notify("Specializations Saved Locally", f"Remote sync failed and will retry: {str(exc)[:120]}", "warning", 4200)
         return True
@@ -5214,6 +5324,8 @@ class MainWindow(QMainWindow):
             for idx, row in enumerate(event_rows[:4]):
                 card = NewsCard(row["title"] or "Guild Event", row["body"] or "", "", format_event_central_time(row["event_at"] or row["created_at"]), emphasize_date=True, truncate_body=True)
                 card.doubleClicked.connect(lambda i=idx: self.show_dashboard_event_detail(i, 0))
+                card.setContextMenuPolicy(Qt.CustomContextMenu)
+                card.customContextMenuRequested.connect(lambda pos, i=idx, c=card: self.show_dashboard_event_context_menu(i, c.mapToGlobal(pos)))
                 self.dashboard_events_cards.addWidget(card)
 
     def _set_status_pill_value(self, pill, value: str):
@@ -5274,8 +5386,8 @@ class MainWindow(QMainWindow):
             for row in self.current_guild_news:
                 title_text = (row["title"] or "Guild Update")
                 body_text = str(row["body"] or "").replace("\n", " ")
-                if body_text and len(body_text) > 90:
-                    body_text = body_text[:90].rstrip() + "..."
+                if body_text and len(body_text) > 180:
+                    body_text = body_text[:180].rstrip() + "..."
                 text = title_text + ((" — " + body_text) if body_text else "")
                 self.guild_page_news.add_row([text, format_app_date(row["created_at"]), "READ MORE" if row["body"] else "—"])
             self.guild_page_news.setSortingEnabled(True)
@@ -5286,8 +5398,8 @@ class MainWindow(QMainWindow):
             for row in self.current_guild_events:
                 title_text = (row["title"] or "Guild Event")
                 body_text = str(row["body"] or "").replace("\n", " ")
-                if body_text and len(body_text) > 90:
-                    body_text = body_text[:90].rstrip() + "..."
+                if body_text and len(body_text) > 180:
+                    body_text = body_text[:180].rstrip() + "..."
                 text = title_text + ((" — " + body_text) if body_text else "")
                 event_id = str(row["remote_id"] or "")
                 attending_count = db.event_attendance_count(event_id, guild) if event_id else 0
@@ -5299,6 +5411,7 @@ class MainWindow(QMainWindow):
                 when_raw = row["event_at"] or row["created_at"]
                 self.guild_page_events.add_row([text, format_event_central_time(when_raw), event_timing_badge(when_raw), att_text, int_text, "READ MORE" if row["body"] else "—"])
             self.guild_page_events.setSortingEnabled(True)
+            self.guild_page_events.resizeRowsToContents()
         if hasattr(self, "guild_page_links"):
             self.guild_page_links.setSortingEnabled(False)
             self.guild_page_links.setRowCount(0)
@@ -5330,11 +5443,41 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def push_pending_member_specializations(self) -> None:
+        """Upload locally changed member specializations, then clear their pending flag on success."""
+        url, key = active_supabase()
+        guild = db.get_setting("guild_code", "").upper()
+        if not url or not key or not guild or "PASTE_" in key:
+            return
+        pending = db.list_pending_member_specializations(guild)
+        if not pending:
+            return
+        for row in pending:
+            display_name = (row["display_name"] or "").strip()
+            if not display_name:
+                continue
+            payload = [{
+                "guild_code": guild,
+                "display_name": display_name,
+                "crafting": int(row["crafting"] or 1),
+                "gathering": int(row["gathering"] or 1),
+                "exploration": int(row["exploration"] or 1),
+                "combat": int(row["combat"] or 1),
+                "sabotage": int(row["sabotage"] or 1),
+            }]
+            supabase_request("POST", url, key, "member_specializations?on_conflict=guild_code,display_name", payload)
+            db.mark_member_specializations_synced(guild, display_name)
+
     def sync_guild_dashboard_content(self, show_errors: bool = False):
         url, key = active_supabase()
         guild = db.get_setting("guild_code", "").upper()
         if not url or not key or not guild:
             return
+        try:
+            self.push_pending_member_specializations()
+        except Exception as exc:
+            if show_errors:
+                QMessageBox.warning(self, "Member Specializations Sync", str(exc))
         try:
             news = supabase_request("GET", url, key, f"guild_news?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=created_at.desc&limit=30")
             db.cache_guild_news(news, guild)
@@ -5457,6 +5600,39 @@ class MainWindow(QMainWindow):
             f"</div>"
         )
 
+    def show_guild_event_context_menu(self, pos):
+        table = getattr(self, "guild_page_events", None)
+        if not table:
+            return
+        row = table.rowAt(pos.y())
+        if row >= 0:
+            table.selectRow(row)
+        event = self._event_row_from_table("guild", table.currentRow())
+        if not event:
+            return
+        menu = QMenu(self)
+        act_attending = menu.addAction("✅ Mark Attending")
+        act_interested = menu.addAction("⭐ Mark Interested")
+        act_remove = menu.addAction("❌ Remove Response")
+        menu.addSeparator()
+        act_view = menu.addAction("View Responses")
+        act_open = menu.addAction("Open Details")
+        menu.addSeparator()
+        act_delete = menu.addAction("Delete Event")
+        chosen = menu.exec(table.viewport().mapToGlobal(pos))
+        if chosen == act_attending:
+            self.set_selected_event_response("attending")
+        elif chosen == act_interested:
+            self.set_selected_event_response("interested")
+        elif chosen == act_remove:
+            self.set_selected_event_response("")
+        elif chosen == act_view:
+            self.show_selected_event_attendees()
+        elif chosen == act_open:
+            self.show_guild_event_detail(table.currentRow(), 0)
+        elif chosen == act_delete:
+            self.delete_selected_guild_event()
+
     def show_dashboard_event_detail(self, row: int, col: int):
         event = self._event_row_from_table("dashboard", row)
         if not event:
@@ -5482,9 +5658,7 @@ class MainWindow(QMainWindow):
         when = event["event_at"] or event["created_at"] or ""
         DetailDialog(event["title"] or "Event Responses", self._format_event_response_body(event), self, meta=f"When: {format_event_central_time(when)}").exec()
 
-    def set_selected_event_response(self, status: str = ""):
-        row = self.guild_page_events.currentRow() if hasattr(self, "guild_page_events") else -1
-        event = self._event_row_from_table("guild", row)
+    def set_event_response_for_event(self, event, status: str = ""):
         if not event:
             QMessageBox.information(self, "Event Response", "Select an event first.")
             return
@@ -5511,6 +5685,8 @@ class MainWindow(QMainWindow):
         final_status = "" if status == current_status else status
         url, key = active_supabase()
         try:
+            # Save locally first so the UI updates even if the network is slow or Supabase is unavailable.
+            db.set_local_event_response(event_id, guild, display_name, final_status)
             if url and key and "PASTE_" not in key and not event_id.startswith("local-event-"):
                 safe_event = urllib.parse.quote(event_id)
                 safe_guild = urllib.parse.quote(guild)
@@ -5520,14 +5696,41 @@ class MainWindow(QMainWindow):
                     supabase_request("POST", url, key, "guild_event_attendance?on_conflict=event_id,display_name", payload)
                 else:
                     supabase_request("DELETE", url, key, f"guild_event_attendance?event_id=eq.{safe_event}&guild_code=eq.{safe_guild}&display_name=eq.{safe_name}")
-            db.set_local_event_response(event_id, guild, display_name, final_status)
             self.sync_guild_dashboard_content(show_errors=False)
             self.refresh_guild_page()
             self.refresh_dashboard()
             label = "Response removed." if not final_status else ("Marked attending." if final_status == "attending" else "Marked interested.")
             self.notify("Event Response", label, "success")
         except Exception as exc:
-            QMessageBox.critical(self, "Event Response Failed", str(exc))
+            # Keep the local change. The user asked for this to be saved locally; background sync can catch up later.
+            self.refresh_guild_page()
+            self.refresh_dashboard()
+            self.notify("Event Saved Locally", f"Saved locally. Remote sync failed: {str(exc)[:120]}", "warning", 5200)
+
+    def set_selected_event_response(self, status: str = ""):
+        row = self.guild_page_events.currentRow() if hasattr(self, "guild_page_events") else -1
+        event = self._event_row_from_table("guild", row)
+        self.set_event_response_for_event(event, status)
+
+    def show_dashboard_event_context_menu(self, index: int, global_pos):
+        event = self._event_row_from_table("dashboard", index)
+        if not event:
+            return
+        menu = QMenu(self)
+        act_attending = menu.addAction("✅ Mark Attending")
+        act_interested = menu.addAction("⭐ Mark Interested")
+        act_remove = menu.addAction("❌ Remove Response")
+        menu.addSeparator()
+        act_open = menu.addAction("Open Details")
+        chosen = menu.exec(global_pos)
+        if chosen == act_attending:
+            self.set_event_response_for_event(event, "attending")
+        elif chosen == act_interested:
+            self.set_event_response_for_event(event, "interested")
+        elif chosen == act_remove:
+            self.set_event_response_for_event(event, "")
+        elif chosen == act_open:
+            self.show_dashboard_event_detail(index, 0)
 
     def set_selected_event_attendance(self, attending: bool = True):
         self.set_selected_event_response("attending" if attending else "")
@@ -5647,6 +5850,47 @@ class MainWindow(QMainWindow):
         if 0 <= row < len(links):
             item = links[row]
             DetailDialog(item["title"] or "Helpful Link", item["url"] or "No URL", self, meta=f"Added by: {item['created_by'] or '—'}").exec()
+
+    def show_guild_news_context_menu(self, pos):
+        table = getattr(self, "guild_page_news", None)
+        if not table:
+            return
+        row = table.rowAt(pos.y())
+        if row >= 0:
+            table.selectRow(row)
+        news = self._news_row_from_table("guild", table.currentRow())
+        if not news:
+            return
+        menu = QMenu(self)
+        act_open = menu.addAction("Open Announcement")
+        act_delete = menu.addAction("Delete Announcement")
+        chosen = menu.exec(table.viewport().mapToGlobal(pos))
+        if chosen == act_open:
+            self.show_guild_news_detail(table.currentRow(), 0)
+        elif chosen == act_delete:
+            self.delete_selected_guild_news()
+
+    def show_guild_link_context_menu(self, pos):
+        table = getattr(self, "guild_page_links", None)
+        if not table:
+            return
+        row = table.rowAt(pos.y())
+        if row >= 0:
+            table.selectRow(row)
+        rid = self.selected_guild_link_remote_id()
+        if not rid:
+            return
+        menu = QMenu(self)
+        act_open = menu.addAction("Open Link")
+        act_edit = menu.addAction("Edit Link")
+        act_delete = menu.addAction("Delete Link")
+        chosen = menu.exec(table.viewport().mapToGlobal(pos))
+        if chosen == act_open:
+            self.open_selected_guild_link(table.currentRow(), 0)
+        elif chosen == act_edit:
+            self.edit_guild_link()
+        elif chosen == act_delete:
+            self.delete_guild_link()
 
     def delete_selected_guild_news(self):
         if not self._current_guild_admin():
@@ -6344,7 +6588,9 @@ class MainWindow(QMainWindow):
                 safe_label_set_text(label, "NO GUILD")
             return
         setting_path = resolve_local_path(db.get_setting("guild_logo_path", ""))
-        path = setting_path if setting_path.exists() else guild_logo_cache_path()
+        path = setting_path if setting_path.exists() else guild_logo_cache_path(guild)
+        if not path.exists() and legacy_guild_logo_cache_path().exists():
+            path = legacy_guild_logo_cache_path()
         fallback = asset_path("images", "default_guild_logo.png")
         pix = QPixmap(str(path)) if path.exists() else QPixmap(str(fallback)) if fallback.exists() else QPixmap()
         for label in widgets:
@@ -6372,6 +6618,11 @@ class MainWindow(QMainWindow):
         self.refresh_guild_logo_widgets()
 
     def sync_guild_logo_from_remote(self):
+        """Pull the guild logo from Supabase and update every live logo widget.
+
+        This uses a per-guild cache file and updates the local guild_logo_path setting
+        so Dashboard, Guild Admin, and Settings all show the same synced logo.
+        """
         url, key = active_supabase()
         guild = db.get_setting("guild_code", "").upper()
         if not url or not key or not guild:
@@ -6380,15 +6631,26 @@ class MainWindow(QMainWindow):
         try:
             rows = supabase_request("GET", url, key, f"guilds?guild_code=eq.{urllib.parse.quote(guild)}&select=logo_data&limit=1")
             logo_data = (rows[0].get("logo_data") if rows else "") or ""
-            path = guild_logo_cache_path()
+            path = guild_logo_cache_path(guild)
             if logo_data:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(base64.b64decode(logo_data))
-            elif path.exists():
-                path.unlink()
-        except Exception:
-            pass
+                db.set_setting("guild_logo_path", str(path))
+            else:
+                # Remote has no logo. Clear only the current guild's cached logo so
+                # stale logos from another guild do not appear after joining/switching.
+                if path.exists():
+                    path.unlink()
+                if resolve_local_path(db.get_setting("guild_logo_path", "")) == path:
+                    db.set_setting("guild_logo_path", "")
+        except Exception as exc:
+            try:
+                if hasattr(self, "sync_manager"):
+                    self.sync_manager.statusChanged.emit(f"Guild logo sync skipped: {exc}")
+            except Exception:
+                pass
         self.refresh_guild_logo_widgets()
+        self.refresh_guild_page_identity()
 
     def upload_guild_logo(self):
         if not self._current_guild_admin():
@@ -6409,7 +6671,7 @@ class MainWindow(QMainWindow):
         # Local-first: show the logo immediately, even if the remote database does
         # not yet have guilds.logo_data. This removes the scary Qt/deleted-label
         # error and makes the dashboard/sidebar update instantly.
-        cache = guild_logo_cache_path()
+        cache = guild_logo_cache_path(guild)
         cache.parent.mkdir(parents=True, exist_ok=True)
         pix.scaled(512, 512, Qt.KeepAspectRatio, Qt.SmoothTransformation).save(str(cache), "PNG")
         db.set_setting("guild_logo_path", str(cache))
@@ -6424,8 +6686,19 @@ class MainWindow(QMainWindow):
             return
         try:
             encoded = base64.b64encode(cache.read_bytes()).decode("ascii")
-            supabase_request("PATCH", url, key, f"guilds?guild_code=eq.{urllib.parse.quote(guild)}", {"logo_data": encoded})
-            self.notify("Guild Logo Synced", "Remote logo updated.", "success")
+            updated = supabase_request("PATCH", url, key, f"guilds?guild_code=eq.{urllib.parse.quote(guild)}", {"logo_data": encoded})
+            # If the remote guild row was missing, upsert it with the logo data so
+            # other clients can pull it on their next sync/join.
+            if not updated:
+                supabase_request("POST", url, key, "guilds?on_conflict=guild_code", [{
+                    "guild_code": guild,
+                    "guild_name": db.get_setting("guild_name", guild) or guild,
+                    "owner_name": db.get_setting("display_name", ""),
+                    "logo_data": encoded,
+                }])
+            self.notify("Guild Logo Synced", "Remote logo updated for all guild members.", "success")
+            if hasattr(self, "sync_manager"):
+                self.sync_manager.queue("guild", immediate=False)
         except Exception as exc:
             # Do not treat missing logo_data as an upload failure. The local app is
             # already updated and usable; SQL can be added later to enable remote logos.
@@ -6439,7 +6712,8 @@ class MainWindow(QMainWindow):
         if not self._current_guild_admin():
             self.notify("Permission Denied", "Only owners/officers can delete the guild logo.", "warning")
             return
-        path = guild_logo_cache_path()
+        guild = db.get_setting("guild_code", "").upper()
+        path = guild_logo_cache_path(guild)
         dlg = QDialog(self)
         dlg.setWindowTitle("Delete Guild Logo")
         dlg.setMinimumWidth(480)
@@ -6473,7 +6747,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
         if dlg.exec() != QDialog.Accepted:
             return
-        guild = db.get_setting("guild_code", "").upper()
         url, key = active_supabase()
         try:
             if guild and url and key:
@@ -7096,11 +7369,18 @@ class MainWindow(QMainWindow):
                             self.sync_manager.statusChanged.emit("Remote guild code already exists")
                         return
 
-                supabase_request("POST", url, key, "guilds?on_conflict=guild_code", [{
+                _logo_path = guild_logo_cache_path(guild_code)
+                _guild_payload = {
                     "guild_code": guild_code,
                     "guild_name": guild_name,
                     "owner_name": display_name,
-                }])
+                }
+                if _logo_path.exists():
+                    try:
+                        _guild_payload["logo_data"] = base64.b64encode(_logo_path.read_bytes()).decode("ascii")
+                    except Exception:
+                        pass
+                supabase_request("POST", url, key, "guilds?on_conflict=guild_code", [_guild_payload])
                 supabase_request("POST", url, key, "guild_members?on_conflict=guild_code,display_name", [{
                     "guild_code": guild_code,
                     "display_name": display_name,

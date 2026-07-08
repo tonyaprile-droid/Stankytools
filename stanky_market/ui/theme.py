@@ -290,6 +290,121 @@ QLabel#ActionTitle, QLabel#NewsTitle {{
     letter-spacing: 1.3px;
 }}
 
+
+/* Phase 3 UI polish: consistent premium controls, compact dialogs, and stronger readability. */
+QPushButton:disabled, QToolButton:disabled {{
+    background: rgba(18,16,13,0.55);
+    border: 1px solid rgba(214,174,90,0.14);
+    color: rgba(245,243,237,0.36);
+}}
+QPushButton#DangerButton {{
+    background: rgba(110, 38, 31, 0.55);
+    border: 1px solid rgba(214, 75, 75, 0.52);
+    color: #FFD8D8;
+}}
+QPushButton#DangerButton:hover {{
+    background: rgba(145, 48, 38, 0.82);
+    border: 1px solid rgba(255, 128, 128, 0.82);
+}}
+QPushButton#GhostButton {{
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(214,174,90,0.18);
+    color: rgba(245,243,237,0.74);
+    padding: 5px 9px;
+}}
+QPushButton#GhostButton:hover {{
+    background: rgba(214,174,90,0.12);
+    border: 1px solid rgba(214,174,90,0.50);
+    color: #fff4ce;
+}}
+QLabel#MutedLabel, QLabel#MutedText {{
+    color: rgba(245,243,237,0.58);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+}}
+QLabel#MicroLabel {{
+    color: rgba(232,201,121,0.66);
+    font-size: 10px;
+    font-weight: 900;
+    letter-spacing: 1.6px;
+}}
+QLabel#GuildStatusPill {{
+    color: #fff4ce;
+    background: rgba(214,174,90,0.10);
+    border: 1px solid rgba(214,174,90,0.32);
+    border-radius: 12px;
+    padding: 6px 9px;
+    font-size: 12px;
+    font-weight: 950;
+    letter-spacing: 1.6px;
+}}
+QLabel#DashboardGuildLogo {{
+    color: #E8C979;
+    background: qradialgradient(cx:0.5, cy:0.42, radius:0.9, fx:0.5, fy:0.42,
+        stop:0 rgba(214,174,90,0.24), stop:0.62 rgba(28,22,14,0.96), stop:1 rgba(8,8,7,0.96));
+    border: 1px solid rgba(214,174,90,0.42);
+    border-radius: 16px;
+    font-size: 13px;
+    font-weight: 950;
+    letter-spacing: 1.4px;
+}}
+QMenu {{
+    background: #11100d;
+    border: 1px solid rgba(214,174,90,0.36);
+    border-radius: 10px;
+    padding: 6px;
+}}
+QMenu::item {{
+    padding: 8px 26px 8px 14px;
+    border-radius: 8px;
+    color: #F5F3ED;
+    font-weight: 800;
+}}
+QMenu::item:selected {{
+    background: rgba(214,174,90,0.18);
+    color: #fff4ce;
+}}
+QDateTimeEdit {{
+    background: rgba(8,8,7,0.80);
+    border: 1px solid rgba(214,174,90,0.24);
+    border-radius: 10px;
+    padding: 8px 10px;
+    color: #F5F3ED;
+}}
+QDateTimeEdit:focus {{
+    border: 1px solid rgba(214,174,90,0.70);
+    background: rgba(14,13,11,0.95);
+}}
+QComboBox::drop-down, QDateTimeEdit::drop-down {{
+    border: 0;
+    width: 24px;
+}}
+QComboBox QAbstractItemView {{
+    background: #11100d;
+    border: 1px solid rgba(214,174,90,0.38);
+    selection-background-color: rgba(214,174,90,0.24);
+    outline: 0;
+}}
+QDialog {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+        stop:0 #0c0b09, stop:1 #16110b);
+}}
+QDialog QLabel {{
+    color: #F5F3ED;
+}}
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+QFrame#ToastNotification {{
+    border-radius: 16px;
+}}
+QTableWidget#IntelTable {{
+    background: rgba(7,7,6,0.72);
+    border: 1px solid rgba(214,174,90,0.28);
+}}
+
 QMessageBox, QDialog {{ background: {PALETTE.deep_charcoal}; }}
 """
 

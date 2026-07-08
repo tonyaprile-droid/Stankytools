@@ -1082,9 +1082,14 @@ def ensure_local_guild_tables() -> None:
                 gathering INTEGER NOT NULL DEFAULT 1,
                 sabotage INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                sync_pending INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (guild_code, display_name)
             )
         """)
+        try:
+            conn.execute("ALTER TABLE member_specializations ADD COLUMN sync_pending INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
         conn.commit()
     finally:
         conn.close()
@@ -1121,7 +1126,7 @@ def list_local_members(guild_code: str = "") -> list[sqlite3.Row]:
 
 
 
-def upsert_member_specializations(guild_code: str, display_name: str, combat: int = 1, exploration: int = 1, crafting: int = 1, gathering: int = 1, sabotage: int = 1) -> None:
+def upsert_member_specializations(guild_code: str, display_name: str, combat: int = 1, exploration: int = 1, crafting: int = 1, gathering: int = 1, sabotage: int = 1, mark_pending: bool = True) -> None:
     ensure_local_guild_tables()
     guild = (guild_code or "").strip().upper()
     name = (display_name or "").strip()
@@ -1137,13 +1142,13 @@ def upsert_member_specializations(guild_code: str, display_name: str, combat: in
         conn.execute(
             """
             INSERT INTO member_specializations
-                (guild_code, display_name, combat, exploration, crafting, gathering, sabotage, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                (guild_code, display_name, combat, exploration, crafting, gathering, sabotage, updated_at, sync_pending)
+            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
             ON CONFLICT(guild_code, display_name) DO UPDATE SET
                 combat=excluded.combat, exploration=excluded.exploration, crafting=excluded.crafting,
-                gathering=excluded.gathering, sabotage=excluded.sabotage, updated_at=CURRENT_TIMESTAMP
+                gathering=excluded.gathering, sabotage=excluded.sabotage, updated_at=CURRENT_TIMESTAMP, sync_pending=excluded.sync_pending
             """,
-            (guild, name, clamp(combat), clamp(exploration), clamp(crafting), clamp(gathering), clamp(sabotage)),
+            (guild, name, clamp(combat), clamp(exploration), clamp(crafting), clamp(gathering), clamp(sabotage), 1 if mark_pending else 0),
         )
         conn.commit()
     finally:
@@ -1170,34 +1175,99 @@ def get_member_specializations(guild_code: str, display_name: str) -> dict:
 
 
 def cache_member_specializations(rows: list[dict], guild_code: str) -> None:
-    """Replace the local specialization cache with the latest remote Supabase rows."""
+    """Replace the local specialization cache with remote rows while preserving unsynced local edits."""
     ensure_local_guild_tables()
     guild = (guild_code or "").strip().upper()
     if not guild:
         return
+    def clamp(value):
+        try:
+            return max(1, min(100, int(value)))
+        except Exception:
+            return 1
     conn = connect()
     try:
+        try:
+            conn.execute("ALTER TABLE member_specializations ADD COLUMN sync_pending INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        pending = conn.execute(
+            "SELECT * FROM member_specializations WHERE guild_code=? AND COALESCE(sync_pending,0)=1",
+            (guild,),
+        ).fetchall()
         conn.execute("DELETE FROM member_specializations WHERE guild_code=?", (guild,))
+        remote_names = set()
         for row in rows or []:
             display_name = str(row.get("display_name") or "").strip()
             if not display_name:
                 continue
+            remote_names.add(display_name.lower())
             conn.execute(
                 """
                 INSERT OR REPLACE INTO member_specializations
-                    (guild_code, display_name, combat, exploration, crafting, gathering, sabotage, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+                    (guild_code, display_name, combat, exploration, crafting, gathering, sabotage, updated_at, sync_pending)
+                VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP), 0)
                 """,
                 (
                     guild, display_name,
-                    int(row.get("combat") or 1), int(row.get("exploration") or 1),
-                    int(row.get("crafting") or 1), int(row.get("gathering") or 1),
-                    int(row.get("sabotage") or 1), str(row.get("updated_at") or ""),
+                    clamp(row.get("combat") or 1), clamp(row.get("exploration") or 1),
+                    clamp(row.get("crafting") or 1), clamp(row.get("gathering") or 1),
+                    clamp(row.get("sabotage") or 1), str(row.get("updated_at") or ""),
+                ),
+            )
+        # Keep local unsynced user edits even after a remote pull, so a bad network save never disappears.
+        for row in pending:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO member_specializations
+                    (guild_code, display_name, combat, exploration, crafting, gathering, sabotage, updated_at, sync_pending)
+                VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP), 1)
+                """,
+                (
+                    guild, row["display_name"], clamp(row["combat"]), clamp(row["exploration"]),
+                    clamp(row["crafting"]), clamp(row["gathering"]), clamp(row["sabotage"]), row["updated_at"] or "",
                 ),
             )
         conn.commit()
     finally:
         conn.close()
+
+
+def list_pending_member_specializations(guild_code: str = "") -> list[sqlite3.Row]:
+    ensure_local_guild_tables()
+    guild = (guild_code or "").strip().upper()
+    conn = connect()
+    try:
+        try:
+            conn.execute("ALTER TABLE member_specializations ADD COLUMN sync_pending INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        return conn.execute(
+            "SELECT * FROM member_specializations WHERE guild_code=? AND COALESCE(sync_pending,0)=1 ORDER BY updated_at ASC",
+            (guild,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def mark_member_specializations_synced(guild_code: str, display_name: str) -> None:
+    ensure_local_guild_tables()
+    guild = (guild_code or "").strip().upper()
+    name = (display_name or "").strip()
+    conn = connect()
+    try:
+        try:
+            conn.execute("ALTER TABLE member_specializations ADD COLUMN sync_pending INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        conn.execute(
+            "UPDATE member_specializations SET sync_pending=0 WHERE guild_code=? AND display_name=?",
+            (guild, name),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 
 def list_member_specializations(guild_code: str = "") -> list[sqlite3.Row]:
     ensure_local_guild_tables()
