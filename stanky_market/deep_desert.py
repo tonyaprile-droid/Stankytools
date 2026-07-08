@@ -23,12 +23,12 @@ DATA_DIR = data_dir() if data_dir is not None else APP_DIR / "data"
 MAP_DIR = DATA_DIR / "deep_desert"
 META_PATH = MAP_DIR / "deep_desert_meta.json"
 HTML_PATH = MAP_DIR / "deep_desert.html"
-MAP_URL = "https://www.method.gg/dune-awakening/deep-desert-companion"
+MAP_URL = "https://dune.gaming.tools/deep-desert"
 USER_AGENT = "StankyToolsDeepDesertLiveLink/2.0 (+weekly-cache)"
 EASTERN_TZ = "America/New_York"
 WEEKLY_UPDATE_WEEKDAY = 1  # Tuesday, Monday=0
 WEEKLY_UPDATE_HOUR = 7
-WEEKLY_UPDATE_MINUTE = 15
+WEEKLY_UPDATE_MINUTE = 30
 PAGE_LOAD_DELAY_SECONDS = 5
 
 
@@ -49,7 +49,7 @@ def _eastern_now() -> datetime:
 
 
 def _current_update_window(now: datetime | None = None) -> datetime:
-    """Return the latest Tuesday 7:15 AM Eastern update window."""
+    """Return the latest Tuesday 7:30 AM Eastern update window."""
     now = now or _eastern_now()
     days_since_tuesday = (now.weekday() - WEEKLY_UPDATE_WEEKDAY) % 7
     candidate = (now - timedelta(days=days_since_tuesday)).replace(
@@ -192,7 +192,7 @@ def check_for_update(force: bool = False) -> dict[str, Any]:
         meta.update({
             "source_url": MAP_URL,
             "skipped": True,
-            "skip_reason": "Cached map already checked for this Tuesday 7:15 AM ET update window.",
+            "skip_reason": "Cached map already checked for this Tuesday 7:30 AM ET update window.",
             "next_scheduled_update": next_tuesday_update(now).isoformat(sep=" "),
         })
         save_meta(meta)
@@ -233,7 +233,57 @@ def check_for_update(force: bool = False) -> dict[str, Any]:
         "skipped": False,
         "last_update_window": update_key,
         "next_scheduled_update": next_tuesday_update(now).isoformat(sep=" "),
-        "update_rule": "Tuesday 7:15 AM Eastern",
+        "update_rule": "Tuesday 7:30 AM Eastern",
+    }
+    save_meta(meta)
+    return meta
+
+
+def map_image_path() -> Path:
+    """Return the canonical cached Deep Desert screenshot path used by the native canvas."""
+    return data_dir() / "deep_desert_map.png" if data_dir is not None else DATA_DIR / "deep_desert_map.png"
+
+def should_auto_screenshot(now: datetime | None = None) -> bool:
+    """True when the weekly Tuesday 7:30 AM ET map screenshot is due.
+
+    The app checks this on Deep Desert page creation/startup. It only returns
+    true after the current weekly reset window and only when the cached map has
+    not already been captured for that window.
+    """
+    now = now or _eastern_now()
+    update_window = _current_update_window(now)
+    if now < update_window:
+        return False
+    meta = load_meta()
+    image_path = str(meta.get("image_path") or map_image_path())
+    cached_exists = bool(image_path and Path(image_path).exists())
+    return (not cached_exists) or meta.get("last_update_window") != update_window.isoformat(sep=" ")
+
+def save_screenshot_meta(image_path: str, force: bool = False) -> dict[str, Any]:
+    """Record metadata after the app captures a live web screenshot."""
+    now = _eastern_now()
+    update_window = _current_update_window(now)
+    old = load_meta()
+    path = Path(image_path)
+    content_hash = ""
+    try:
+        content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    except Exception:
+        content_hash = old.get("content_hash", "")
+    meta = {
+        "source_url": MAP_URL,
+        "last_checked": now.isoformat(sep=" "),
+        "last_changed": now.isoformat(sep=" "),
+        "content_hash": content_hash,
+        "image_url": "",
+        "image_path": str(path),
+        "html_path": str(HTML_PATH),
+        "changed": content_hash != old.get("content_hash", ""),
+        "skipped": False,
+        "capture_method": "QtWebEngine screenshot after 5 second wait",
+        "last_update_window": update_window.isoformat(sep=" "),
+        "next_scheduled_update": next_tuesday_update(now).isoformat(sep=" "),
+        "update_rule": "Tuesday 7:30 AM Eastern",
     }
     save_meta(meta)
     return meta

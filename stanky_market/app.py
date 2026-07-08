@@ -25,7 +25,7 @@ except Exception:
     shiboken6 = None
 
 from PySide6.QtCore import Qt, QSize, QTimer, QPointF, QRectF, QThread, Signal, QUrl, QLoggingCategory, qInstallMessageHandler, QDateTime
-from PySide6.QtGui import QPixmap, QIcon, QPainter, QColor, QBrush, QPen, QFont, QWheelEvent, QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QPixmap, QIcon, QPainter, QColor, QBrush, QPen, QFont, QWheelEvent, QAction, QKeySequence, QShortcut, QImage
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -148,6 +148,38 @@ def asset_path(*parts: str) -> Path:
 
 def qss_path(path: Path) -> str:
     return path.resolve().as_posix()
+
+
+def trim_transparent_pixmap(pixmap: QPixmap) -> QPixmap:
+    """Crop transparent padding from a pixmap so logos fill their UI slot cleanly."""
+    if pixmap.isNull():
+        return pixmap
+    image = pixmap.toImage().convertToFormat(QImage.Format_ARGB32)
+    width = image.width()
+    height = image.height()
+    if width <= 0 or height <= 0 or not image.hasAlphaChannel():
+        return pixmap
+
+    min_x, min_y = width, height
+    max_x, max_y = -1, -1
+    for y in range(height):
+        for x in range(width):
+            if image.pixelColor(x, y).alpha() > 8:
+                if x < min_x:
+                    min_x = x
+                if y < min_y:
+                    min_y = y
+                if x > max_x:
+                    max_x = x
+                if y > max_y:
+                    max_y = y
+
+    if max_x < min_x or max_y < min_y:
+        return pixmap
+    if min_x == 0 and min_y == 0 and max_x == width - 1 and max_y == height - 1:
+        return pixmap
+
+    return QPixmap.fromImage(image.copy(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1))
 
 
 def local_cache_dir(*parts: str) -> Path:
@@ -1238,6 +1270,11 @@ class NativeDeepDesertCanvas(QWidget):
         self.setContextMenuPolicy(Qt.DefaultContextMenu)
         self.setStyleSheet("background:#090806; border:1px solid #4a3518; border-radius:16px;")
 
+    def reload_background(self):
+        """Reload the cached weekly Deep Desert screenshot without recreating the canvas."""
+        self.background = QPixmap(str(data_dir() / "deep_desert_map.png"))
+        self.update()
+
     def set_filters(self, filters: dict[str, bool]):
         self.enabled_filters = dict(filters)
         self.update()
@@ -1721,10 +1758,15 @@ class LiveDeepDesertView(QWidget):
         title.setObjectName("SectionTitle")
         title_box.addWidget(title)
         hero_layout.addLayout(title_box, 1)
-        self.reset_label = StatusPill("Reset", "—")
-        self.sync_label = StatusPill("Sync", "Native")
+        self.reset_label = StatusPill("Weekly Update", "Tue 7:30 ET")
+        self.sync_label = StatusPill("Map", "Cached")
+        self.update_map_btn = QPushButton("Update Weekly Map")
+        self.update_map_btn.setObjectName("PrimaryButton")
+        self.update_map_btn.setToolTip("Capture the current Deep Desert map from dune.gaming.tools after a 5 second load wait.")
+        self.update_map_btn.clicked.connect(lambda: self.update_weekly_map(force=True))
         hero_layout.addWidget(self.reset_label)
         hero_layout.addWidget(self.sync_label)
+        hero_layout.addWidget(self.update_map_btn)
         layout.addWidget(hero)
 
         body = QHBoxLayout()
@@ -1773,6 +1815,362 @@ class LiveDeepDesertView(QWidget):
         self._update_active_label()
         self._sync_canvas_filters()
         self._update_reset_countdown()
+        QTimer.singleShot(1500, self._maybe_auto_update_weekly_map)
+
+    def _map_source_url(self) -> str:
+        return getattr(deep_desert, "MAP_URL", "https://dune.gaming.tools/deep-desert")
+
+    def _set_map_update_busy(self, busy: bool, text: str | None = None):
+        try:
+            self.update_map_btn.setEnabled(not busy)
+            self.update_map_btn.setText(text or ("Updating..." if busy else "Update Weekly Map"))
+        except Exception:
+            pass
+
+    def _maybe_auto_update_weekly_map(self):
+        """Automatically refresh once after the weekly Tuesday 7:30 AM ET reset window."""
+        try:
+            if deep_desert.should_auto_screenshot():
+                self.update_weekly_map(force=False)
+        except Exception:
+            # Auto-update is convenience only; never block the map page from opening.
+            pass
+
+    def update_weekly_map(self, force: bool = True):
+        """Capture dune.gaming.tools/deep-desert after a 5 second wait and use it as the local map.
+
+        This uses QtWebEngine when available so no external browser or Playwright
+        install is required. The cached screenshot is stored in the user's data
+        folder and survives app updates.
+        """
+        if not WEBENGINE_AVAILABLE or QWebEngineView is None:
+            QMessageBox.information(
+                self,
+                "Deep Desert Map",
+                "This build does not include Qt WebEngine, so the map screenshot updater is unavailable.",
+            )
+            return
+        if not force:
+            try:
+                if not deep_desert.should_auto_screenshot():
+                    return
+            except Exception:
+                return
+        self._set_map_update_busy(True, "Loading Map...")
+        self.sync_label.value.setText("Loading")
+
+        view = QWebEngineView()
+        self._weekly_map_view = view
+        try:
+            profile = QWebEngineProfile.defaultProfile() if QWebEngineProfile is not None else None
+            page = QuietWebEnginePage(profile, view) if profile is not None else QuietWebEnginePage(view)
+            view.setPage(page)
+        except Exception:
+            pass
+        view.resize(1600, 1600)
+        view.move(-20000, -20000)
+        view.setWindowOpacity(0.01)
+        view.show()
+
+        def after_loaded(ok: bool):
+            if not ok:
+                self._finish_weekly_map_capture(None, "Unable to load dune.gaming.tools/deep-desert")
+                return
+            self.sync_label.value.setText("Waiting 5s")
+            self._set_map_update_busy(True, "Capturing in 5s...")
+            QTimer.singleShot(5000, lambda: self._capture_weekly_map_view(view))
+
+        view.loadFinished.connect(after_loaded)
+        view.setUrl(QUrl(self._map_source_url()))
+
+    def _capture_weekly_map_view(self, view):
+        """Capture only the square Deep Desert map grid, not the full website chrome/sidebar."""
+        try:
+            js = r"""
+(() => {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+
+  function visibleRect(el) {
+    const r = el.getBoundingClientRect();
+    const st = window.getComputedStyle(el);
+    if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity || 1) === 0) return null;
+    if (r.width < 300 || r.height < 300) return null;
+    if (r.bottom <= 0 || r.right <= 0 || r.top >= vh || r.left >= vw) return null;
+    return {
+      x: Math.max(0, r.left),
+      y: Math.max(0, r.top),
+      w: Math.min(r.width, vw - Math.max(0, r.left)),
+      h: Math.min(r.height, vh - Math.max(0, r.top)),
+      rawW: r.width,
+      rawH: r.height
+    };
+  }
+
+  // 1) Prefer the actual square map element. The site renders the Deep Desert
+  // map as a large square grid to the right of the filters/sidebar. This avoids
+  // capturing the country tabs, side filters, banner, or page chrome.
+  const tags = Array.from(document.querySelectorAll('canvas, img, svg, [class], [style]'));
+  let best = null;
+  let bestScore = -1;
+  for (const el of tags) {
+    const tag = el.tagName.toLowerCase();
+    if (['html', 'body', 'main', 'section', 'aside', 'nav', 'header', 'footer'].includes(tag)) continue;
+    const r = visibleRect(el);
+    if (!r) continue;
+
+    const ratio = r.w / Math.max(1, r.h);
+    const squareError = Math.abs(ratio - 1);
+    if (squareError > 0.12) continue;
+    if (r.x < vw * 0.10 || r.y < 60) continue;
+
+    const cls = String(el.className || '').toLowerCase();
+    const style = window.getComputedStyle(el);
+    const bgImage = String(style.backgroundImage || '').toLowerCase();
+    const id = String(el.id || '').toLowerCase();
+    const label = (cls + ' ' + id + ' ' + bgImage).toLowerCase();
+
+    let score = r.w * r.h;
+    score -= squareError * score * 6;
+    if (tag === 'canvas' || tag === 'img' || tag === 'svg') score *= 4;
+    if (label.includes('map')) score *= 5;
+    if (label.includes('deep')) score *= 3;
+    if (label.includes('aspect-square') || label.includes('square')) score *= 4;
+    if (bgImage && bgImage !== 'none') score *= 2;
+    // Penalize parent wrappers that include nearby filters/text/buttons.
+    const textLen = (el.innerText || '').trim().length;
+    if (textLen > 80) score *= 0.15;
+    if (el.querySelectorAll && el.querySelectorAll('button,input,select,a').length > 2) score *= 0.10;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = r;
+    }
+  }
+
+  if (best && best.w >= 500 && best.h >= 500) {
+    const side = Math.min(best.w, best.h);
+    return { x: Math.round(best.x), y: Math.round(best.y), w: Math.round(side), h: Math.round(side), mode: 'element' };
+  }
+
+  // 2) Geometry fallback based on the known page layout:
+  // the map is the large square immediately to the right of the left filter column.
+  let sidebarRight = 0;
+  for (const el of Array.from(document.querySelectorAll('aside, nav, div'))) {
+    const r = visibleRect(el);
+    if (!r) continue;
+    if (r.x <= 25 && r.w >= 80 && r.w <= 420 && r.h >= 350) {
+      sidebarRight = Math.max(sidebarRight, r.x + r.w);
+    }
+  }
+
+  let x = sidebarRight > 80 ? sidebarRight + 12 : Math.round(vw * 0.19);
+
+  // Top edge is just below the region tabs/date row. Find the first large square-ish
+  // visual area to the right of the sidebar. If unavailable, use the red-box proportions
+  // from the reference screenshot.
+  let y = 0;
+  const rightSideSquares = [];
+  for (const el of tags) {
+    const r = visibleRect(el);
+    if (!r) continue;
+    const ratio = r.w / Math.max(1, r.h);
+    if (r.x >= x - 35 && r.y >= 70 && Math.abs(ratio - 1) <= 0.20 && r.w >= 450 && r.h >= 450) {
+      rightSideSquares.push(r);
+    }
+  }
+  if (rightSideSquares.length) {
+    rightSideSquares.sort((a, b) => (b.w * b.h) - (a.w * a.h));
+    x = Math.round(rightSideSquares[0].x);
+    y = Math.round(rightSideSquares[0].y);
+  } else {
+    y = Math.round(vh * 0.18);
+  }
+
+  const side = Math.floor(Math.min(vw - x - 8, vh - y - 8));
+  if (side >= 500) return { x, y, w: side, h: side, mode: 'geometry' };
+
+  return null;
+})()
+"""
+            try:
+                view.page().runJavaScript(js, lambda rect: self._save_weekly_map_crop(view, rect))
+            except Exception:
+                self._save_weekly_map_crop(view, None)
+        except Exception as exc:
+            self._finish_weekly_map_capture(None, str(exc))
+
+    def _save_weekly_map_crop(self, view, rect):
+        try:
+            pixmap = view.grab()
+            if pixmap.isNull() or pixmap.width() < 600 or pixmap.height() < 600:
+                self._finish_weekly_map_capture(None, "Captured map image was empty.")
+                return
+
+            # The website includes banners, tabs, side filters, and labels around the map.
+            # The user only wants the square sandy Deep Desert map area.  DOM selectors on
+            # dune.gaming.tools change often, so we first detect the actual tan desert map
+            # pixels from the rendered screenshot, then fall back to DOM geometry only if
+            # pixel detection fails.
+            cropped = None
+            detected = self._detect_deep_desert_map_rect(pixmap)
+            if detected is not None:
+                x, y, side = detected
+                cropped = pixmap.copy(x, y, side, side)
+
+            if cropped is None or cropped.isNull():
+                if isinstance(rect, dict):
+                    x = int(float(rect.get("x", 0)))
+                    y = int(float(rect.get("y", 0)))
+                    w = int(float(rect.get("w", 0)))
+                    h = int(float(rect.get("h", 0)))
+                    side = max(0, min(w, h, pixmap.width() - x, pixmap.height() - y))
+                    if side >= 500:
+                        cropped = pixmap.copy(x, y, side, side)
+
+            # Final fallback based on the green-box reference: a square map sitting to the
+            # right of the filter sidebar and below the region tabs.  This fallback is only
+            # used if both pixel detection and DOM detection fail.
+            if cropped is None or cropped.isNull():
+                x = int(pixmap.width() * 0.192)
+                y = int(pixmap.height() * 0.183)
+                side = min(int(pixmap.width() * 0.789), pixmap.width() - x, pixmap.height() - y)
+                if side >= 500:
+                    cropped = pixmap.copy(x, y, side, side)
+                else:
+                    cropped = pixmap
+
+            output = data_dir() / "deep_desert_map.png"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if not cropped.save(str(output), "PNG"):
+                self._finish_weekly_map_capture(None, "Could not save the Deep Desert map crop.")
+                return
+            self._finish_weekly_map_capture(str(output), "Updated")
+        except Exception as exc:
+            self._finish_weekly_map_capture(None, str(exc))
+
+    def _detect_deep_desert_map_rect(self, pixmap):
+        """Return (x, y, side) for the sandy square map area, or None.
+
+        This intentionally captures NOTHING outside the map square. It ignores the
+        left filter sidebar, top banner/tabs, and any page chrome by looking for
+        the large contiguous desert-colored region in the rendered page.
+        """
+        try:
+            image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB32)
+            width = image.width()
+            height = image.height()
+            if width < 600 or height < 600:
+                return None
+
+            step = 4
+            col_hits = [0] * width
+            row_hits = [0] * height
+
+            def is_desert_pixel(rgb: int) -> bool:
+                r = (rgb >> 16) & 255
+                g = (rgb >> 8) & 255
+                b = rgb & 255
+                # Sandy Deep Desert background: warm tan/orange.  These limits are
+                # wide enough for grid lines and shade variation, but exclude the
+                # dark site UI, white text, green/red guide boxes, and icons.
+                return (
+                    125 <= r <= 245
+                    and 75 <= g <= 205
+                    and 35 <= b <= 165
+                    and r >= g + 18
+                    and g >= b + 10
+                    and (r + g + b) >= 260
+                )
+
+            for y in range(0, height, step):
+                row_count = 0
+                for x in range(0, width, step):
+                    if is_desert_pixel(image.pixel(x, y)):
+                        col_hits[x] += 1
+                        row_count += 1
+                row_hits[y] = row_count
+
+            # Convert sampled hit counts into active columns/rows. The map area has
+            # dense tan pixels across the whole square; sidebar/header rows do not.
+            min_col_hits = max(45, int((height / step) * 0.18))
+            min_row_hits = max(45, int((width / step) * 0.18))
+            active_cols = [i for i, c in enumerate(col_hits) if c >= min_col_hits]
+            active_rows = [i for i, c in enumerate(row_hits) if c >= min_row_hits]
+            if not active_cols or not active_rows:
+                return None
+
+            def longest_segment(values, max_gap=12):
+                best = None
+                start = prev = values[0]
+                for value in values[1:]:
+                    if value - prev <= max_gap:
+                        prev = value
+                        continue
+                    if best is None or (prev - start) > (best[1] - best[0]):
+                        best = (start, prev)
+                    start = prev = value
+                if best is None or (prev - start) > (best[1] - best[0]):
+                    best = (start, prev)
+                return best
+
+            x1, x2 = longest_segment(active_cols)
+            y1, y2 = longest_segment(active_rows)
+
+            # Expand from sample coordinates to the map edge. Then force a square by
+            # using the smaller dimension so nothing outside the green-box map area is
+            # included.
+            x1 = max(0, x1 - step)
+            y1 = max(0, y1 - step)
+            x2 = min(width - 1, x2 + step)
+            y2 = min(height - 1, y2 + step)
+            detected_w = x2 - x1 + 1
+            detected_h = y2 - y1 + 1
+            side = min(detected_w, detected_h)
+
+            if side < 500:
+                return None
+
+            # The map is the large square on the right side of the page. Reject any
+            # accidental detection of a small ad/banner or page background.
+            if x1 < int(width * 0.12) or y1 < 70:
+                return None
+
+            # If the detected tan region is slightly taller/wider because of antialiasing,
+            # anchor to the top-left tan edge and crop inward to stay inside the square.
+            x = int(x1)
+            y = int(y1)
+            side = int(min(side, width - x, height - y))
+            return (x, y, side)
+        except Exception:
+            return None
+
+    def _finish_weekly_map_capture(self, image_path: str | None, status: str):
+        try:
+            view = getattr(self, "_weekly_map_view", None)
+            if view is not None:
+                view.hide()
+                view.deleteLater()
+            self._weekly_map_view = None
+        except Exception:
+            pass
+        self._set_map_update_busy(False)
+        if image_path:
+            try:
+                meta = deep_desert.save_screenshot_meta(image_path)
+                self.sync_label.value.setText(format_app_date(str(meta.get("last_checked", ""))))
+            except Exception:
+                self.sync_label.value.setText("Updated")
+            try:
+                self.canvas.reload_background()
+            except Exception:
+                pass
+            if status != "Auto":
+                QMessageBox.information(self, "Deep Desert Map", "Deep Desert map updated from dune.gaming.tools.")
+        else:
+            self.sync_label.value.setText("Failed")
+            if status:
+                QMessageBox.warning(self, "Deep Desert Map", f"Map update failed: {status}")
 
     def _set_all_filters(self, checked: bool):
         return
@@ -1836,23 +2234,24 @@ class LiveDeepDesertView(QWidget):
     def _update_reset_countdown(self):
         try:
             meta = deep_desert.load_meta()
-            nxt = str(meta.get("next_update", ""))
+            nxt = str(meta.get("next_scheduled_update", ""))
             if nxt:
                 self.reset_label.value.setText(format_app_date(nxt))
             else:
-                self.reset_label.value.setText("Tuesday 7:15")
+                self.reset_label.value.setText("Tue 7:30 ET")
         except Exception:
-            self.reset_label.value.setText("Tuesday 7:15")
+            self.reset_label.value.setText("Tue 7:30 ET")
 
     def reload(self):
         try:
             meta = deep_desert.load_meta()
-            self.sync_label.value.setText(format_app_date(str(meta.get("last_checked", ""))))
-            self.map_status.setText("Manual sync complete • Native renderer")
+            self.sync_label.value.setText(format_app_date(str(meta.get("last_checked", ""))) or "Cached")
         except Exception:
-            self.sync_label.value.setText("Native")
-            self.map_status.setText("Manual sync complete • Native renderer")
-        self.canvas.update()
+            self.sync_label.value.setText("Cached")
+        try:
+            self.canvas.reload_background()
+        except Exception:
+            self.canvas.update()
 
 
 class GuildJoinDialog(QDialog):
@@ -2510,19 +2909,24 @@ class MainWindow(QMainWindow):
 
         side_header = QFrame()
         side_header.setObjectName("SideHeader")
+        side_header.setContentsMargins(0, 0, 0, 0)
+        side_header.setStyleSheet("QFrame#SideHeader { background: transparent; border: none; padding: 0px; margin: 0px; }")
         head_layout = QVBoxLayout(side_header)
         head_layout.setContentsMargins(0, 0, 0, 0)
         head_layout.setSpacing(0)
 
         self.sidebar_logo = QLabel()
+        self.sidebar_logo.setObjectName("MascotLogo")
         self.sidebar_logo.setAlignment(Qt.AlignCenter)
-        self.sidebar_logo.setFixedHeight(390)
+        self.sidebar_logo.setContentsMargins(0, 0, 0, 0)
+        self.sidebar_logo.setStyleSheet("QLabel#MascotLogo { background: transparent; border: none; padding: 0px; margin: 0px; }")
+        self.sidebar_logo.setFixedHeight(340)
         stanky_logo = asset_path("images", "stankytools_mascot_logo.png")
         if stanky_logo.exists():
-            pix = QPixmap(str(stanky_logo))
+            pix = trim_transparent_pixmap(QPixmap(str(stanky_logo)))
             if not pix.isNull():
-                self.sidebar_logo.setPixmap(pix.scaled(316, 386, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        head_layout.addWidget(self.sidebar_logo)
+                self.sidebar_logo.setPixmap(pix.scaled(304, 336, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        head_layout.addWidget(self.sidebar_logo, 0, Qt.AlignCenter)
 
         self.sidebar_guild_status = QLabel((db.get_setting("guild_name", "NO GUILD") or "NO GUILD").upper())
         self.sidebar_guild_status.setObjectName("GuildStatusPill")
@@ -5001,7 +5405,10 @@ class MainWindow(QMainWindow):
         elif kind == "base" and hasattr(self, "base_sync_status"):
             self.base_sync_status.setText("Auto-syncing base marker...")
         if hasattr(self, "sync_manager"):
-            self.sync_manager.queue(kind, immediate=False)
+            # Marker changes should reach other open apps quickly.  Use immediate
+            # debounce so add/edit/delete POIs do not sit in the queue until the
+            # next periodic timer.
+            self.sync_manager.queue(kind, immediate=True)
             self.notify("Sync Queued", f"{kind.title()} change saved locally and will sync in the background.", "info", 1800)
         else:
             if kind == "poi":
@@ -5075,18 +5482,34 @@ class MainWindow(QMainWindow):
             self.sync_guild_dashboard_content(show_errors=False)
 
     def pull_guild_updates(self):
-        """Pull remote guild content so other users' changes appear automatically."""
+        """Pull remote guild content so other users' changes appear automatically.
+
+        Phase 3.5 accidentally narrowed the periodic pull to dashboard content only,
+        which meant Deep Desert POIs/bases stopped appearing on other clients unless
+        the user manually synced. Keep this method as the central lightweight
+        background pull for all guild-visible data.
+        """
         if getattr(self, "_sync_running", False):
             return
         if not db.get_setting("guild_code", "").strip():
             return
         try:
+            # Pull map markers first so the Deep Desert list/canvas stays current.
+            self.sync_guild_pois(show_popup=False)
+            self.sync_guild_bases(show_popup=False)
+
+            # Pull dashboard/guild content after markers.
             self.sync_guild_dashboard_content(show_errors=False)
             self.refresh_current_member_role()
+
+            # Redraw only what exists in the current window instance.
+            if hasattr(self, "dd_base_table") or hasattr(self, "map_view"):
+                self.refresh_deep_desert_bases()
             self.refresh_dashboard()
             self.refresh_guild_page()
-        except Exception:
-            pass
+        except Exception as exc:
+            if hasattr(self, "poi_sync_status"):
+                self.poi_sync_status.setText(f"Auto-sync issue: {exc}")
 
     def refresh_activity(self):
         # Guild Activity feed has been removed from the UI.
@@ -5495,13 +5918,18 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            events = supabase_request("GET", url, key, f"guild_events?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=event_at.desc&limit=30")
+            events = supabase_request("GET", url, key, f"guild_events?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=event_at.desc&limit=60")
             db.cache_guild_events(events, guild)
-            attendance = supabase_request("GET", url, key, f"guild_event_attendance?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=created_at.asc")
-            db.cache_guild_event_attendance(attendance, guild)
         except Exception as exc:
             if show_errors:
                 QMessageBox.warning(self, "Guild Events", str(exc))
+        try:
+            attendance = supabase_request("GET", url, key, f"guild_event_attendance?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=created_at.asc")
+            db.cache_guild_event_attendance(attendance, guild)
+        except Exception as exc:
+            # Do not let a missing/outdated attendance table block event syncing.
+            if show_errors:
+                QMessageBox.warning(self, "Event Responses", str(exc))
         try:
             specs = supabase_request("GET", url, key, f"member_specializations?guild_code=eq.{urllib.parse.quote(guild)}&select=*&order=display_name.asc")
             db.cache_member_specializations(specs, guild)
@@ -5613,7 +6041,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         act_attending = menu.addAction("✅ Mark Attending")
         act_interested = menu.addAction("⭐ Mark Interested")
-        act_remove = menu.addAction("❌ Remove Response")
+        act_remove = menu.addAction("❌ Not Attending / Remove Response")
         menu.addSeparator()
         act_view = menu.addAction("View Responses")
         act_open = menu.addAction("Open Details")
@@ -5696,6 +6124,10 @@ class MainWindow(QMainWindow):
                     supabase_request("POST", url, key, "guild_event_attendance?on_conflict=event_id,display_name", payload)
                 else:
                     supabase_request("DELETE", url, key, f"guild_event_attendance?event_id=eq.{safe_event}&guild_code=eq.{safe_guild}&display_name=eq.{safe_name}")
+            try:
+                self.sync_manager.queue("events", immediate=True)
+            except Exception:
+                pass
             self.sync_guild_dashboard_content(show_errors=False)
             self.refresh_guild_page()
             self.refresh_dashboard()
@@ -5719,7 +6151,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         act_attending = menu.addAction("✅ Mark Attending")
         act_interested = menu.addAction("⭐ Mark Interested")
-        act_remove = menu.addAction("❌ Remove Response")
+        act_remove = menu.addAction("❌ Not Attending / Remove Response")
         menu.addSeparator()
         act_open = menu.addAction("Open Details")
         chosen = menu.exec(global_pos)
@@ -5806,7 +6238,7 @@ class MainWindow(QMainWindow):
                     "event_at": when.strip(),
                 }])
                 if rows:
-                    db.cache_guild_events(rows, guild)
+                    db.upsert_guild_events(rows, guild)
                 self.log_guild_activity(f"added guild event: {title.strip()}")
             except Exception as exc:
                 db.add_local_guild_event(guild, title.strip(), body.strip(), created_by, when.strip())
@@ -5816,6 +6248,10 @@ class MainWindow(QMainWindow):
         self.sync_guild_dashboard_content(show_errors=False)
         self.refresh_guild_page()
         self.refresh_dashboard()
+        try:
+            self.sync_manager.queue("events", immediate=True)
+        except Exception:
+            pass
         self.queue_guild_sync("Event Added", "Guild event saved and queued for sync.")
 
     def delete_selected_guild_event(self):

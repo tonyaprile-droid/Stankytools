@@ -1331,27 +1331,60 @@ def delete_local_guild_news(remote_id: str) -> None:
         conn.close()
 
 
-def cache_guild_events(rows: list[dict], guild_code: str) -> None:
-    guild = (guild_code or "").strip().upper()
+def _event_cache_tuple(row: dict, guild_code: str) -> tuple[str, str, str, str, str, str, str]:
+    guild = (guild_code or row.get("guild_code") or "").strip().upper()
+    return (
+        str(row.get("id") or row.get("remote_id") or "").strip(),
+        guild,
+        row.get("title") or "",
+        row.get("body") or row.get("notes") or "",
+        row.get("created_by") or "",
+        row.get("event_at") or row.get("starts_at") or "",
+        row.get("created_at") or "",
+    )
+
+
+def upsert_guild_events(rows: list[dict], guild_code: str) -> None:
+    """Insert/update remote events without clearing the whole local cache.
+
+    This is used after creating a single event so a partial Supabase response does not
+    make every other event disappear until the next full pull.
+    """
     conn = connect()
     try:
-        conn.execute("DELETE FROM guild_events_cache WHERE guild_code=?", (guild,))
         for row in rows or []:
+            values = _event_cache_tuple(row, guild_code)
+            if not values[0] or not values[1]:
+                continue
             conn.execute(
                 """
                 INSERT OR REPLACE INTO guild_events_cache
                 (remote_id, guild_code, title, body, created_by, event_at, created_at)
                 VALUES(?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    str(row.get("id") or row.get("remote_id") or ""),
-                    guild,
-                    row.get("title") or "",
-                    row.get("body") or row.get("notes") or "",
-                    row.get("created_by") or "",
-                    row.get("event_at") or row.get("starts_at") or "",
-                    row.get("created_at") or "",
-                ),
+                values,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def cache_guild_events(rows: list[dict], guild_code: str) -> None:
+    guild = (guild_code or "").strip().upper()
+    conn = connect()
+    try:
+        conn.execute("DELETE FROM guild_events_cache WHERE guild_code=?", (guild,))
+        for row in rows or []:
+            values = _event_cache_tuple(row, guild)
+            if not values[0]:
+                continue
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO guild_events_cache
+                (remote_id, guild_code, title, body, created_by, event_at, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
             )
         conn.commit()
     finally:
