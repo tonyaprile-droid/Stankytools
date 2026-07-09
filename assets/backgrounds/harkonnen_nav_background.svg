@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="1400" viewBox="0 0 420 1400" preserveAspectRatio="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#080403"/>
+      <stop offset="0.48" stop-color="#1A0907"/>
+      <stop offset="1" stop-color="#3A1710"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#C95A4A" stop-opacity="0.22"/>
+      <stop offset="0.35" stop-color="#6A231C" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </linearGradient>
+    <pattern id="sand" width="84" height="84" patternUnits="userSpaceOnUse">
+      <path d="M-10 60 C18 42 42 78 86 54 M-8 22 C28 6 48 35 92 18" fill="none" stroke="#C95A4A" stroke-opacity="0.055" stroke-width="2"/>
+      <circle cx="20" cy="18" r="1.2" fill="#C95A4A" fill-opacity="0.09"/>
+      <circle cx="63" cy="51" r="1" fill="#C95A4A" fill-opacity="0.07"/>
+    </pattern>
+    <radialGradient id="glow" cx="28%" cy="12%" r="82%">
+      <stop offset="0" stop-color="#C95A4A" stop-opacity="0.16"/>
+      <stop offset="0.34" stop-color="#6A231C" stop-opacity="0.09"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="420" height="1400" fill="url(#bg)"/>
+  <rect width="420" height="1400" fill="url(#sand)"/>
+  <rect width="420" height="1400" fill="url(#glow)"/>
+  <rect width="190" height="1400" fill="url(#edge)"/>
+  <path d="M18 0 L18 1400" stroke="#C95A4A" stroke-opacity="0.18" stroke-width="2"/>
+  <path d="M390 0 L390 1400" stroke="#C95A4A" stroke-opacity="0.22" stroke-width="2"/>
+  <path d="M0 180 C84 150 144 220 232 186 S358 165 420 196" fill="none" stroke="#C95A4A" stroke-opacity="0.075" stroke-width="5"/>
+  <path d="M0 1020 C86 980 148 1060 246 1015 S362 995 420 1032" fill="none" stroke="#C95A4A" stroke-opacity="0.06" stroke-width="6"/>
+  <rect width="420" height="1400" fill="#000000" opacity="0.24"/>
+</svg>

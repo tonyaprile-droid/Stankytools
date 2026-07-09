@@ -1,4 +1,4 @@
-APP_VERSION = "0.3.17"   # or whatever your current version is
+﻿APP_VERSION = "1.0.2"   # or whatever your current version is
 
 from .update_engine import *
 from .manifest import *

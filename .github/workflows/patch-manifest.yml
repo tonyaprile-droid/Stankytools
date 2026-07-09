@@ -1,4 +1,4 @@
-name: Build Patch Manifest
+﻿name: Build Patch Manifest
 
 on:
   workflow_dispatch:
@@ -21,9 +21,11 @@ jobs:
       - name: Build manifest
         run: |
           $version = "${{ github.ref_name }}".TrimStart("v")
-          py -m stanky_market.updater2.manifest_builder --root dist/StankyTools --base-url "https://github.com/TheStankylegTools/StankyTools/releases/download/${{ github.ref_name }}" --version $version --out dist/StankyTools/manifest.json
+          py -m stanky_market.updater2.manifest_builder --root dist/StankyTools --base-url "https://github.com/StankylegTools/StankyTools-Releases/releases/download/${{ github.ref_name }}" --version $version --out dist/StankyTools/manifest.json
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: StankyTools-patch-manifest
           path: dist/StankyTools/manifest.json
+
+

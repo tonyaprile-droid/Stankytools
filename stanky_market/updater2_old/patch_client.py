@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import shutil
@@ -10,7 +10,7 @@ from .hash_utils import file_matches, sha256_file
 from .manifest import UpdateManifest, ManifestFile
 from .paths import app_root, updates_dir, backup_dir
 
-DEFAULT_MANIFEST_URL = "https://github.com/TheStankylegTools/StankyTools/releases/latest/download/manifest.json"
+DEFAULT_MANIFEST_URL = "https://github.com/StankylegTools/StankyTools-Releases/releases/latest/download/manifest.json"
 
 
 @dataclass
@@ -81,3 +81,5 @@ class PatchClient:
             return UpdateResult(updated=True, version=manifest.version)
         except Exception as exc:
             return UpdateResult(updated=False, error=str(exc))
+
+

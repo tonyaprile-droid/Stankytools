@@ -1,4 +1,4 @@
-# -*- mode: python ; coding: utf-8 -*-
+﻿# -*- mode: python ; coding: utf-8 -*-
 """Lean PyInstaller spec for StankyTools.
 
 The old spec used collect_all('PySide6'), which pulls in far more Qt files than
@@ -16,12 +16,16 @@ datas = []
 # by each user and saved under AppData/StankyTools, not bundled into releases.
 if (project / "assets").exists():
     datas.append(("assets", "assets"))
+if (project / "stanky_market" / "assets").exists():
+    datas.append(("stanky_market/assets", "stanky_market/assets"))
 
 hiddenimports = [
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
     "PySide6.QtNetwork",
+    "PySide6.QtSvg",
+    "PySide6.QtSvgWidgets",
     "PySide6.QtMultimedia",
     "PySide6.QtMultimediaWidgets",
 ]
@@ -39,7 +43,7 @@ excludes = [
     "PySide6.QtLocation", "PySide6.QtNfc",
     "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtPositioning", "PySide6.QtQuick3D",
     "PySide6.QtSensors", "PySide6.QtSerialPort", "PySide6.QtSql",
-    "PySide6.QtSvg", "PySide6.QtTextToSpeech", "PySide6.QtUiTools",
+    "PySide6.QtTextToSpeech", "PySide6.QtUiTools",
     "PySide6.QtWebChannel", "PySide6.QtWebSockets",
     "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
     "PySide6.QtWebEngineQuick", "PySide6.QtWebEngineCore",
@@ -59,6 +63,20 @@ a = Analysis(
     noarchive=False,
     optimize=2,
 )
+
+# PyInstaller's Qt hooks can still collect large optional runtimes through plugin
+# metadata. This app uses widget-based Qt, SVG rendering, networking, SQLite,
+# and multimedia only; it does not use QML/Quick/PDF/OpenGL scenes.
+_DROP_BINARY_TOKENS = (
+    "opengl32sw.dll",
+    "qt6quick",
+    "qt6qml",
+    "qt6qmlmodels",
+    "qt6pdf",
+    "qt6opengl",
+)
+a.binaries = [item for item in a.binaries if not any(token in item[0].lower() for token in _DROP_BINARY_TOKENS)]
+a.datas = [item for item in a.datas if not any(token in item[0].lower() for token in ("qml", "quick", "pdf"))]
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -87,3 +105,5 @@ coll = COLLECT(
     upx_exclude=["Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"],
     name="StankyTools",
 )
+
+

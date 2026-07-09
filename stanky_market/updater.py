@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass
@@ -15,9 +16,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-APP_VERSION = "0.3.17"
-GITHUB_OWNER = "TheStankylegTools"
-GITHUB_REPO = "Stankytools"
+APP_VERSION = "1.0.2"
+GITHUB_OWNER = "StankylegTools"
+# Public, releases-only repository. Keep the source repository private.
+# Attach only compiled Windows assets here; the updater ignores GitHub source archives.
+GITHUB_REPO = "StankyTools-Releases"
 RELEASES_URL = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 LIST_RELEASES_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases?per_page=1"
@@ -157,9 +160,9 @@ def check_for_update(timeout: int = 12) -> UpdateInfo:
         update_available=False,
         release_name="No published release found",
         html_url=RELEASES_URL,
-        body="No published GitHub release was found, or the repository is private and the app is checking without authentication.",
+        body="No published GitHub release was found in the public StankyTools releases repository.",
         asset_urls=[],
-        message="No published GitHub release found. If the repository is private, the built-in updater cannot see it without authentication.",
+        message="No published GitHub release found in the public StankyTools releases repository.",
     )
 
 
@@ -177,34 +180,64 @@ def current_executable() -> Path:
     return Path(sys.executable).resolve()
 
 
+def _asset_file_name(url: str) -> str:
+    return Path(urllib.parse.urlparse(url).path).name.lower()
+
+
+def _looks_like_source_archive(url: str) -> bool:
+    lower = url.lower()
+    name = _asset_file_name(url)
+    if "/zipball/" in lower or "/tarball/" in lower or "/archive/" in lower:
+        return True
+    return any(token in name for token in ("source", "source-code", "source_code", "src"))
+
+
+def _supported_update_asset(url: str) -> bool:
+    name = _asset_file_name(url)
+    if _looks_like_source_archive(url):
+        return False
+    if name.endswith((".exe", ".msi")):
+        return True
+    if not name.endswith(".zip"):
+        return False
+    # Portable ZIPs are supported, but avoid the ambiguous uploaded project/source ZIP.
+    return any(token in name for token in ("windows", "win", "portable", "installer", "release", "dist"))
+
+
 def choose_update_asset(info: UpdateInfo) -> str:
     if not info.asset_urls:
-        raise RuntimeError("This release has no downloadable assets. Attach StankyTools-Windows.zip to the GitHub Release.")
-    preferred_names = (
-        "stankytools-windows.zip",
-        "stankytools_windows.zip",
-        "stankytools-portable.zip",
-        "stankytools_portable.zip",
-        "stankytools.zip",
-    )
-    lower_pairs = [(url.lower(), url) for url in info.asset_urls]
-    for name in preferred_names:
-        for lower, original in lower_pairs:
-            if lower.endswith(name) or name in lower:
-                return original
-    for lower, original in lower_pairs:
-        if lower.endswith(".zip"):
-            return original
-    raise RuntimeError("No ZIP update asset was found in the latest release.")
+        raise RuntimeError("This release has no Windows installer or portable ZIP asset. Attach StankyTools-Setup-vX.X.X.exe or StankyTools-Portable-vX.X.X.zip to the public GitHub Release.")
 
+    candidates = [url for url in info.asset_urls if _supported_update_asset(url)]
+    if not candidates:
+        raise RuntimeError("No Windows installer/EXE or portable ZIP update asset was found. Source-code ZIPs are ignored by the updater.")
+
+    preferred_patterns = (
+        r"^stankytools[-_]?setup[-_]?v?\d+(?:\.\d+)*\.exe$",
+        r"^stankytools[-_]?portable[-_]?v?\d+(?:\.\d+)*\.zip$",
+        r"^stankytools[-_]?installer[-_]?v?\d+(?:\.\d+)*\.exe$",
+        r"^stankytools[-_]?(?:windows|win)[-_]?v?\d*(?:\.\d+)*\.zip$",
+        r"^stankytools[-_]?(?:windows|win)[-_]?v?\d*(?:\.\d+)*\.exe$",
+        r"^stankytools[-_]?v?\d+(?:\.\d+)*\.msi$",
+    )
+    lower_pairs = [(_asset_file_name(url), url) for url in candidates]
+    for pattern in preferred_patterns:
+        for file_name, original in lower_pairs:
+            if re.match(pattern, file_name):
+                return original
+    for extension in (".exe", ".msi", ".zip"):
+        for file_name, original in lower_pairs:
+            if file_name.endswith(extension):
+                return original
+    raise RuntimeError("No supported Windows update asset was found in the latest release.")
 
 def download_update(info: UpdateInfo, progress: ProgressCallback | None = None, timeout: int = 30, target_dir: Path | None = None) -> Path:
     """Download the selected update asset to %LOCALAPPDATA%\\StankyTools\\updates."""
     asset_url = choose_update_asset(info)
     target_dir = target_dir or updates_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / Path(asset_url.split("?")[0]).name
-    if not target.name.lower().endswith(".zip"):
+    target = target_dir / Path(urllib.parse.urlparse(asset_url).path).name
+    if not target.suffix:
         target = target.with_suffix(".zip")
 
     partial = target.with_suffix(target.suffix + ".part")
@@ -212,7 +245,7 @@ def download_update(info: UpdateInfo, progress: ProgressCallback | None = None, 
         if old.exists():
             old.unlink(missing_ok=True)
 
-    _write_state(status="downloading", version=info.latest_version, zip_path=str(target), release_url=info.html_url)
+    _write_state(status="downloading", version=info.latest_version, package_path=str(target), zip_path=str(target) if target.suffix.lower() == ".zip" else "", release_url=info.html_url)
     _log(f"Downloading {asset_url} -> {target}")
 
     req = urllib.request.Request(asset_url, headers={"User-Agent": f"StankyTools/{APP_VERSION}"})
@@ -231,17 +264,27 @@ def download_update(info: UpdateInfo, progress: ProgressCallback | None = None, 
     partial.replace(target)
 
     # Validate before returning so bad downloads never get staged.
-    with zipfile.ZipFile(target, "r") as zf:
-        names = zf.namelist()
-        if not any(name.lower().endswith("stankytools.exe") for name in names):
-            raise RuntimeError("Update ZIP does not contain StankyTools.exe. Check the GitHub Release asset.")
+    suffix = target.suffix.lower()
+    if suffix == ".zip":
+        with zipfile.ZipFile(target, "r") as zf:
+            names = zf.namelist()
+            if not any(name.lower().endswith("stankytools.exe") for name in names):
+                raise RuntimeError("Update ZIP does not contain StankyTools.exe. Check the GitHub Release asset.")
+        zip_path = str(target)
+        package_kind = "portable_zip"
+    elif suffix in (".exe", ".msi"):
+        if target.stat().st_size < 1024 * 1024:
+            raise RuntimeError("Downloaded installer is unexpectedly small. Check the GitHub Release asset.")
+        zip_path = ""
+        package_kind = "installer"
+    else:
+        raise RuntimeError("Unsupported update package type. Use a Windows installer EXE/MSI or portable ZIP.")
 
     if progress:
         progress(target.stat().st_size, target.stat().st_size)
-    _write_state(status="downloaded", version=info.latest_version, zip_path=str(target), release_url=info.html_url)
-    _log(f"Downloaded and validated update ZIP: {target}")
+    _write_state(status="downloaded", version=info.latest_version, package_kind=package_kind, package_path=str(target), zip_path=zip_path, release_url=info.html_url)
+    _log(f"Downloaded and validated update package: {target}")
     return target
-
 
 def _escape_ps(value: Path | str) -> str:
     return str(value).replace("'", "''")
@@ -308,3 +351,10 @@ def stage_update_and_restart(zip_path: Path) -> None:
     script = _write_windows_update_script(zip_path.resolve(), app_dir, exe_path)
     subprocess.Popen(["cmd", "/c", str(script)], close_fds=True)
     _log("Updater script launched; app should quit now.")
+
+
+
+
+
+
+

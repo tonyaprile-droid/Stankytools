@@ -525,6 +525,22 @@ def _ensure_runtime_columns(conn: sqlite3.Connection) -> None:
             PRIMARY KEY(event_id, guild_code, display_name)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS guild_event_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            operation TEXT NOT NULL,
+            guild_code TEXT NOT NULL,
+            remote_id TEXT DEFAULT '',
+            title TEXT DEFAULT '',
+            body TEXT DEFAULT '',
+            created_by TEXT DEFAULT '',
+            event_at TEXT DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            synced_at TEXT DEFAULT ''
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_guild_event_outbox_pending ON guild_event_outbox(guild_code, synced_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_guild_event_outbox_remote ON guild_event_outbox(remote_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_guild_event_attendance_event ON guild_event_attendance_cache(event_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_guild_event_attendance_guild ON guild_event_attendance_cache(guild_code)")
     try:
@@ -640,6 +656,10 @@ def add_poi(
         conn.close()
 
 
+def _sync_stamp(value: str) -> str:
+    return str(value or "").strip().replace("T", " ").replace("Z", "").split("+", 1)[0]
+
+
 def upsert_remote_poi(
     remote_id: str,
     x: float,
@@ -653,18 +673,22 @@ def upsert_remote_poi(
     last_updated_by: str = "",
     pooped_on: bool = False,
     status: str = "active",
+    updated_at: str = "",
 ) -> None:
     remote_id = str(remote_id or "").strip()
     if not remote_id:
         return
     conn = connect()
     try:
-        existing = conn.execute("SELECT id FROM deep_desert_pois WHERE remote_id=?", (remote_id,)).fetchone()
+        existing = conn.execute("SELECT id, updated_at FROM deep_desert_pois WHERE remote_id=?", (remote_id,)).fetchone()
+        remote_updated = _sync_stamp(updated_at)
+        if existing and remote_updated and _sync_stamp(existing["updated_at"]) > remote_updated:
+            return
         if existing:
             conn.execute(
                 """
                 UPDATE deep_desert_pois
-                SET x=?, y=?, label=?, note=?, guild_code=?, poi_type=?, created_by=?, last_updated_by=?, pooped_on=?, status=?, archived_at=CASE WHEN ? IN ('defeated','gone') THEN COALESCE(NULLIF(archived_at, ''), CURRENT_TIMESTAMP) ELSE '' END, updated_at=CURRENT_TIMESTAMP
+                SET x=?, y=?, label=?, note=?, guild_code=?, poi_type=?, created_by=?, last_updated_by=?, pooped_on=?, status=?, archived_at=CASE WHEN ? IN ('defeated','gone') THEN COALESCE(NULLIF(archived_at, ''), CURRENT_TIMESTAMP) ELSE '' END, updated_at=COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP)
                 WHERE remote_id=?
                 """,
                 (
@@ -679,6 +703,7 @@ def upsert_remote_poi(
                     1 if pooped_on else 0,
                     (status or "active").strip().lower(),
                     (status or "active").strip().lower(),
+                    remote_updated,
                     remote_id,
                 ),
             )
@@ -687,7 +712,7 @@ def upsert_remote_poi(
                 """
                 INSERT INTO deep_desert_pois
                     (map_key, x, y, label, note, guild_code, remote_id, poi_type, created_by, last_updated_by, pooped_on, status, archived_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IN ('defeated','gone') THEN CURRENT_TIMESTAMP ELSE '' END, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? IN ('defeated','gone') THEN CURRENT_TIMESTAMP ELSE '' END, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
                 """,
                 (
                     map_key,
@@ -703,6 +728,7 @@ def upsert_remote_poi(
                     1 if pooped_on else 0,
                     (status or "active").strip().lower(),
                     (status or "active").strip().lower(),
+                    remote_updated,
                 ),
             )
         conn.commit()
@@ -826,21 +852,24 @@ def delete_base(base_id: int) -> None:
         conn.close()
 
 
-def upsert_remote_base(remote_id: str, x: float, y: float, base_name: str, seitch: str, guild_code: str, created_by: str, map_key: str = "hagga_basin", status: str = "friendly") -> None:
+def upsert_remote_base(remote_id: str, x: float, y: float, base_name: str, seitch: str, guild_code: str, created_by: str, map_key: str = "hagga_basin", status: str = "friendly", updated_at: str = "") -> None:
     remote_id = str(remote_id or "").strip()
     if not remote_id:
         return
     conn = connect()
     try:
-        existing = conn.execute("SELECT id FROM guild_bases WHERE remote_id=?", (remote_id,)).fetchone()
+        existing = conn.execute("SELECT id, updated_at FROM guild_bases WHERE remote_id=?", (remote_id,)).fetchone()
+        remote_updated = _sync_stamp(updated_at)
+        if existing and remote_updated and _sync_stamp(existing["updated_at"]) > remote_updated:
+            return
         if existing:
             conn.execute(
                 """
                 UPDATE guild_bases
-                SET x=?, y=?, base_name=?, seitch=?, guild_code=?, created_by=?, status=?, updated_at=CURRENT_TIMESTAMP
+                SET x=?, y=?, base_name=?, seitch=?, guild_code=?, created_by=?, status=?, updated_at=COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP)
                 WHERE remote_id=?
                 """,
-                (float(x), float(y), base_name.strip(), seitch.strip(), guild_code.strip(), created_by.strip(), (status or "friendly").strip().lower(), remote_id),
+                (float(x), float(y), base_name.strip(), seitch.strip(), guild_code.strip(), created_by.strip(), (status or "friendly").strip().lower(), remote_updated, remote_id),
             )
         else:
             conn.execute(
@@ -1170,10 +1199,20 @@ def ensure_local_guild_tables() -> None:
                 guild_code TEXT NOT NULL,
                 display_name TEXT NOT NULL,
                 role TEXT NOT NULL DEFAULT 'member',
+                status TEXT NOT NULL DEFAULT 'offline',
+                last_seen TEXT DEFAULT '',
                 joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (guild_code, display_name)
             )
         """)
+        for ddl in (
+            "ALTER TABLE local_guild_members ADD COLUMN status TEXT NOT NULL DEFAULT 'offline'",
+            "ALTER TABLE local_guild_members ADD COLUMN last_seen TEXT DEFAULT ''",
+        ):
+            try:
+                conn.execute(ddl)
+            except Exception:
+                pass
         conn.execute("""
             CREATE TABLE IF NOT EXISTS member_specializations (
                 guild_code TEXT NOT NULL,
@@ -1197,17 +1236,53 @@ def ensure_local_guild_tables() -> None:
         conn.close()
 
 
-def upsert_local_member(guild_code: str, display_name: str, role: str = "member") -> None:
+def upsert_local_member(guild_code: str, display_name: str, role: str = "member", status: str | None = None, last_seen: str | None = None) -> None:
     ensure_local_guild_tables()
+    conn = connect()
+    try:
+        guild = (guild_code or "").strip().upper()
+        name = (display_name or "").strip()
+        clean_role = (role or "member").strip().lower()
+        clean_status = (status or "").strip().lower()
+        if clean_status not in {"online", "away", "dnd", "offline"}:
+            clean_status = ""
+        conn.execute(
+            """
+            INSERT INTO local_guild_members(guild_code, display_name, role, status, last_seen)
+            VALUES(?, ?, ?, COALESCE(NULLIF(?, ''), 'offline'), COALESCE(NULLIF(?, ''), ''))
+            ON CONFLICT(guild_code, display_name) DO UPDATE SET
+                role=excluded.role,
+                status=COALESCE(NULLIF(excluded.status, ''), local_guild_members.status, 'offline'),
+                last_seen=COALESCE(NULLIF(excluded.last_seen, ''), local_guild_members.last_seen, '')
+            """,
+            (guild, name, clean_role, clean_status, (last_seen or "").strip()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_member_presence(guild_code: str, display_name: str, status: str = "online", last_seen: str | None = None) -> None:
+    """Update the local/offline heartbeat for one guild member."""
+    ensure_local_guild_tables()
+    guild = (guild_code or "").strip().upper()
+    name = (display_name or "").strip()
+    clean_status = (status or "online").strip().lower()
+    if clean_status not in {"online", "away", "dnd", "offline"}:
+        clean_status = "online"
+    if not guild or not name:
+        return
     conn = connect()
     try:
         conn.execute(
             """
-            INSERT INTO local_guild_members(guild_code, display_name, role)
-            VALUES(?, ?, ?)
-            ON CONFLICT(guild_code, display_name) DO UPDATE SET role=excluded.role
+            INSERT INTO local_guild_members(guild_code, display_name, role, status, last_seen)
+            VALUES(?, ?, 'member', ?, COALESCE(NULLIF(?, ''), CURRENT_TIMESTAMP))
+            ON CONFLICT(guild_code, display_name) DO UPDATE SET
+                status=excluded.status,
+                last_seen=excluded.last_seen
             """,
-            ((guild_code or "").strip().upper(), (display_name or "").strip(), (role or "member").strip().lower()),
+            (guild, name, clean_status, (last_seen or "").strip()),
         )
         conn.commit()
     finally:
@@ -1220,7 +1295,7 @@ def list_local_members(guild_code: str = "") -> list[sqlite3.Row]:
     try:
         guild = (guild_code or "").strip().upper()
         return conn.execute(
-            "SELECT display_name, role, joined_at FROM local_guild_members WHERE guild_code=? ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'officer' THEN 1 ELSE 2 END, display_name COLLATE NOCASE",
+            "SELECT display_name, role, status, last_seen, joined_at FROM local_guild_members WHERE guild_code=? ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'officer' THEN 1 ELSE 2 END, display_name COLLATE NOCASE",
             (guild,),
         ).fetchall()
     finally:
@@ -1475,6 +1550,16 @@ def cache_guild_events(rows: list[dict], guild_code: str) -> None:
     guild = (guild_code or "").strip().upper()
     conn = connect()
     try:
+        # Preserve local events that have not been uploaded yet. A full remote pull
+        # should not wipe offline-created events before the outbox has synced them.
+        local_pending = conn.execute(
+            """
+            SELECT remote_id, guild_code, title, body, created_by, event_at, created_at
+            FROM guild_events_cache
+            WHERE guild_code=? AND remote_id LIKE 'local-event-%'
+            """,
+            (guild,),
+        ).fetchall()
         conn.execute("DELETE FROM guild_events_cache WHERE guild_code=?", (guild,))
         for row in rows or []:
             values = _event_cache_tuple(row, guild)
@@ -1487,6 +1572,15 @@ def cache_guild_events(rows: list[dict], guild_code: str) -> None:
                 VALUES(?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
+            )
+        for row in local_pending:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO guild_events_cache
+                (remote_id, guild_code, title, body, created_by, event_at, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                tuple(row),
             )
         conn.commit()
     finally:
@@ -1505,21 +1599,65 @@ def list_guild_events(guild_code: str = "", limit: int = 20) -> list[sqlite3.Row
         conn.close()
 
 
-def add_local_guild_event(guild_code: str, title: str, body: str, created_by: str, event_at: str = "") -> str:
+def add_local_guild_event(guild_code: str, title: str, body: str, created_by: str, event_at: str = "", mark_pending: bool = False) -> str:
     import uuid
     rid = "local-event-" + uuid.uuid4().hex
     conn = connect()
     try:
         guild = (guild_code or "").strip().upper()
+        clean_title = (title or "").strip()
+        clean_body = (body or "").strip()
+        clean_by = (created_by or "").strip()
+        clean_at = (event_at or "").strip()
         conn.execute(
             """
             INSERT INTO guild_events_cache(remote_id, guild_code, title, body, created_by, event_at, created_at)
             VALUES(?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             """,
-            (rid, guild, (title or "").strip(), (body or "").strip(), (created_by or "").strip(), (event_at or "").strip()),
+            (rid, guild, clean_title, clean_body, clean_by, clean_at),
         )
+        if mark_pending:
+            conn.execute(
+                """
+                INSERT INTO guild_event_outbox(operation, guild_code, remote_id, title, body, created_by, event_at)
+                VALUES('upsert', ?, ?, ?, ?, ?, ?)
+                """,
+                (guild, rid, clean_title, clean_body, clean_by, clean_at),
+            )
         conn.commit()
         return rid
+    finally:
+        conn.close()
+
+
+def update_local_guild_event(guild_code: str, remote_id: str, title: str, body: str, event_at: str = "", mark_pending: bool = False) -> None:
+    guild = (guild_code or "").strip().upper()
+    rid = (remote_id or "").strip()
+    clean_title = (title or "").strip()
+    clean_body = (body or "").strip()
+    clean_at = (event_at or "").strip()
+    if not guild or not rid:
+        return
+    conn = connect()
+    try:
+        conn.execute(
+            """
+            UPDATE guild_events_cache
+            SET title=?, body=?, event_at=?
+            WHERE guild_code=? AND remote_id=?
+            """,
+            (clean_title, clean_body, clean_at, guild, rid),
+        )
+        if mark_pending:
+            created_by = get_setting("display_name", "")
+            conn.execute(
+                """
+                INSERT INTO guild_event_outbox(operation, guild_code, remote_id, title, body, created_by, event_at)
+                VALUES('upsert', ?, ?, ?, ?, ?, ?)
+                """,
+                (guild, rid, clean_title, clean_body, created_by, clean_at),
+            )
+        conn.commit()
     finally:
         conn.close()
 
@@ -1528,6 +1666,72 @@ def delete_local_guild_event(remote_id: str) -> None:
     conn = connect()
     try:
         conn.execute("DELETE FROM guild_events_cache WHERE remote_id=?", ((remote_id or "").strip(),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def queue_guild_event_delete(guild_code: str, remote_id: str) -> None:
+    guild = (guild_code or "").strip().upper()
+    rid = (remote_id or "").strip()
+    if not guild or not rid:
+        return
+    conn = connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO guild_event_outbox(operation, guild_code, remote_id)
+            VALUES('delete', ?, ?)
+            """,
+            (guild, rid),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_pending_guild_event_changes(guild_code: str) -> list[sqlite3.Row]:
+    guild = (guild_code or "").strip().upper()
+    conn = connect()
+    try:
+        return conn.execute(
+            """
+            SELECT * FROM guild_event_outbox
+            WHERE guild_code=? AND COALESCE(synced_at, '')=''
+            ORDER BY id ASC
+            """,
+            (guild,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def mark_guild_event_change_synced(change_id: int) -> None:
+    conn = connect()
+    try:
+        conn.execute("UPDATE guild_event_outbox SET synced_at=CURRENT_TIMESTAMP WHERE id=?", (int(change_id),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def replace_local_guild_event_id(local_remote_id: str, remote_row: dict, guild_code: str) -> None:
+    local_id = (local_remote_id or "").strip()
+    if not local_id:
+        return
+    conn = connect()
+    try:
+        conn.execute("DELETE FROM guild_events_cache WHERE remote_id=?", (local_id,))
+        values = _event_cache_tuple(remote_row or {}, guild_code)
+        if values[0] and values[1]:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO guild_events_cache
+                (remote_id, guild_code, title, body, created_by, event_at, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
         conn.commit()
     finally:
         conn.close()

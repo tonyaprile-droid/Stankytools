@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 import threading
@@ -9,7 +9,7 @@ from typing import Iterable
 from . import db
 from .paths import local_app_data_dir
 
-GITHUB_IMAGE_BASE_URL = "https://raw.githubusercontent.com/tonyaprile-droid/stanky-tools-assets/main/items"
+GITHUB_IMAGE_BASE_URL = "https://raw.githubusercontent.com/StankylegTools/stanky-tools-assets/main/items"
 CATALOG_IMAGE_DIR = local_app_data_dir() / "item_images"
 _IMAGE_EXTS = (".webp", ".png", ".jpg", ".jpeg")
 
@@ -105,3 +105,4 @@ def import_missing_catalog_images_async(limit: int | None = None) -> threading.T
     thread = threading.Thread(target=worker, name="CatalogImageImporter", daemon=True)
     thread.start()
     return thread
+
