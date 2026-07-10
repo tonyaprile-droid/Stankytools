@@ -1,28 +1,105 @@
-!define APP_NAME "StankyTools"
-!ifndef VERSION
-!define VERSION "dev"
+Unicode True
+
+!include "MUI2.nsh"
+!include "FileFunc.nsh"
+
+!ifndef APP_VERSION
+    !define APP_VERSION "0.0.0"
 !endif
-!define OUT_DIR "release_artifacts"
+
+!define APP_NAME "StankyTools"
+!define COMPANY_NAME "TheStankylegTools"
+!define APP_EXE "StankyTools.exe"
 
 Name "${APP_NAME}"
-OutFile "${OUT_DIR}\StankyTools-Setup-${VERSION}.exe"
-InstallDir "$LOCALAPPDATA\${APP_NAME}"
-RequestExecutionLevel user
-ShowInstDetails nevershow
-ShowUninstDetails nevershow
+OutFile "release_artifacts\StankyTools-Setup-v${APP_VERSION}.exe"
 
-Section "Install"
-  SetOutPath "$INSTDIR"
-  File /r "dist\StankyTools\*"
-  CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\StankyTools.exe"
-  CreateDirectory "$SMPROGRAMS\${APP_NAME}"
-  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\StankyTools.exe"
-  WriteUninstaller "$INSTDIR\Uninstall.exe"
+InstallDir "$LOCALAPPDATA\Programs\${APP_NAME}"
+InstallDirRegKey HKCU "Software\${COMPANY_NAME}\${APP_NAME}" "InstallLocation"
+
+RequestExecutionLevel user
+SetCompressor /SOLID lzma
+SetCompressorDictSize 64
+
+VIProductVersion "0.0.0.0"
+VIAddVersionKey "ProductName" "${APP_NAME}"
+VIAddVersionKey "CompanyName" "${COMPANY_NAME}"
+VIAddVersionKey "FileDescription" "${APP_NAME} Windows Installer"
+VIAddVersionKey "FileVersion" "${APP_VERSION}"
+VIAddVersionKey "ProductVersion" "${APP_VERSION}"
+
+!define MUI_ABORTWARNING
+!define MUI_ICON "assets\app.ico"
+!define MUI_UNICON "assets\app.ico"
+
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+
+!insertmacro MUI_LANGUAGE "English"
+
+Section "Install StankyTools" SEC_MAIN
+    SetOutPath "$INSTDIR"
+
+    ; Support a PyInstaller onedir build.
+    !if /FileExists "dist\StankyTools\StankyTools.exe"
+        File /r "dist\StankyTools\*.*"
+
+    ; Support a PyInstaller onefile build.
+    !else if /FileExists "dist\StankyTools.exe"
+        File "/oname=${APP_EXE}" "dist\StankyTools.exe"
+
+    !else
+        !error "StankyTools build output was not found. Expected dist\StankyTools.exe or dist\StankyTools\StankyTools.exe."
+    !endif
+
+    WriteUninstaller "$INSTDIR\Uninstall.exe"
+
+    WriteRegStr HKCU "Software\${COMPANY_NAME}\${APP_NAME}" \
+        "InstallLocation" "$INSTDIR"
+
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+        "DisplayName" "${APP_NAME}"
+
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+        "DisplayVersion" "${APP_VERSION}"
+
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+        "Publisher" "${COMPANY_NAME}"
+
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+        "InstallLocation" "$INSTDIR"
+
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+        "DisplayIcon" "$INSTDIR\${APP_EXE}"
+
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+        "UninstallString" '"$INSTDIR\Uninstall.exe"'
+
+    CreateDirectory "$SMPROGRAMS\${APP_NAME}"
+    CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" \
+        "$INSTDIR\${APP_EXE}"
+
+    CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" \
+        "$INSTDIR\Uninstall.exe"
+
+    CreateShortcut "$DESKTOP\${APP_NAME}.lnk" \
+        "$INSTDIR\${APP_EXE}"
 SectionEnd
 
 Section "Uninstall"
-  Delete "$DESKTOP\${APP_NAME}.lnk"
-  Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
-  RMDir "$SMPROGRAMS\${APP_NAME}"
-  RMDir /r "$INSTDIR"
+    Delete "$DESKTOP\${APP_NAME}.lnk"
+
+    Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
+    Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
+    RMDir "$SMPROGRAMS\${APP_NAME}"
+
+    RMDir /r "$INSTDIR"
+
+    DeleteRegKey HKCU "Software\${COMPANY_NAME}\${APP_NAME}"
+    DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 SectionEnd
