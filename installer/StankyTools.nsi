@@ -40,50 +40,85 @@ VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 
 !insertmacro MUI_LANGUAGE "English"
 
+Var InstalledExe
+
+Function FindAppExe
+    StrCpy $InstalledExe ""
+
+    IfFileExists "$INSTDIR\StankyTools.exe" 0 +3
+        StrCpy $InstalledExe "$INSTDIR\StankyTools.exe"
+        Return
+
+    IfFileExists "$INSTDIR\StankyTools\StankyTools.exe" 0 +3
+        StrCpy $InstalledExe "$INSTDIR\StankyTools\StankyTools.exe"
+        Return
+
+    IfFileExists "$INSTDIR\dist\StankyTools.exe" 0 +3
+        StrCpy $InstalledExe "$INSTDIR\dist\StankyTools.exe"
+        Return
+
+    IfFileExists "$INSTDIR\dist\StankyTools\StankyTools.exe" 0 +3
+        StrCpy $InstalledExe "$INSTDIR\dist\StankyTools\StankyTools.exe"
+        Return
+FunctionEnd
+
 Section "Install StankyTools" SEC_MAIN
     SetOutPath "$INSTDIR"
 
-    !if /FileExists "dist\StankyTools\StankyTools.exe"
-        File /r "dist\StankyTools\*.*"
-    !else if /FileExists "dist\StankyTools.exe"
-        File "/oname=${APP_EXE}" "dist\StankyTools.exe"
-    !else
-        !error "StankyTools build output was not found. Expected dist\StankyTools.exe or dist\StankyTools\StankyTools.exe."
-    !endif
+    ; Package the entire PyInstaller dist directory regardless of its structure.
+    File /r "dist\*.*"
+
+    Call FindAppExe
+
+    StrCmp $InstalledExe "" 0 AppFound
+        MessageBox MB_ICONSTOP \
+            "StankyTools.exe was not found after installation."
+        Abort
+
+    AppFound:
 
     WriteUninstaller "$INSTDIR\Uninstall.exe"
 
     WriteRegStr HKCU "Software\${COMPANY_NAME}\${APP_NAME}" \
         "InstallLocation" "$INSTDIR"
 
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    WriteRegStr HKCU \
+        "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
         "DisplayName" "${APP_NAME}"
 
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    WriteRegStr HKCU \
+        "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
         "DisplayVersion" "${APP_VERSION}"
 
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    WriteRegStr HKCU \
+        "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
         "Publisher" "${COMPANY_NAME}"
 
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    WriteRegStr HKCU \
+        "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
         "InstallLocation" "$INSTDIR"
 
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
-        "DisplayIcon" "$INSTDIR\${APP_EXE}"
+    WriteRegStr HKCU \
+        "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+        "DisplayIcon" "$InstalledExe"
 
-    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
+    WriteRegStr HKCU \
+        "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" \
         "UninstallString" '"$INSTDIR\Uninstall.exe"'
 
     CreateDirectory "$SMPROGRAMS\${APP_NAME}"
 
-    CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" \
-        "$INSTDIR\${APP_EXE}"
+    CreateShortcut \
+        "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" \
+        "$InstalledExe"
 
-    CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" \
+    CreateShortcut \
+        "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" \
         "$INSTDIR\Uninstall.exe"
 
-    CreateShortcut "$DESKTOP\${APP_NAME}.lnk" \
-        "$INSTDIR\${APP_EXE}"
+    CreateShortcut \
+        "$DESKTOP\${APP_NAME}.lnk" \
+        "$InstalledExe"
 SectionEnd
 
 Section "Uninstall"
@@ -96,5 +131,7 @@ Section "Uninstall"
     RMDir /r "$INSTDIR"
 
     DeleteRegKey HKCU "Software\${COMPANY_NAME}\${APP_NAME}"
-    DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
+
+    DeleteRegKey HKCU \
+        "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 SectionEnd
