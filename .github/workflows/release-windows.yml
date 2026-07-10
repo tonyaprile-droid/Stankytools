@@ -1,0 +1,187 @@
+name: Release Windows
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag, for example v1.0.3"
+        required: true
+        default: "v1.0.3"
+
+permissions:
+  contents: read
+
+jobs:
+  release-windows:
+    name: Build installer and portable ZIP
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set release version
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ github.event.inputs.version }}"
+          } else {
+            $tag = "${{ github.ref_name }}"
+          }
+
+          if (-not $tag.StartsWith("v")) {
+            $tag = "v$tag"
+          }
+
+          $number = $tag.TrimStart("v")
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "VERSION_NUMBER=$number" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: List workflow files
+        shell: pwsh
+        run: |
+          Write-Host "Workflow files:"
+          Get-ChildItem .github/workflows -File | Where-Object { $_.Extension -in ".yml", ".yaml" } | Sort-Object Name | ForEach-Object {
+            Write-Host " - $($_.Name)"
+          }
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Python diagnostics before install
+        shell: pwsh
+        run: |
+          python --version
+          Write-Host "where python"`r`n          where.exe python
+          python -m pip --version
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller==6.21.0
+          python -m PyInstaller --version
+          python -c "import PyInstaller; print(f'PyInstaller import OK: {PyInstaller.__version__}')"
+          python -m pip list
+
+      - name: Install NSIS installer builder
+        shell: pwsh
+        run: |
+          choco install nsis --yes --no-progress
+          $candidates = @(
+            "C:\Program Files (x86)\NSIS\makensis.exe",
+            "C:\Program Files\NSIS\makensis.exe"
+          )
+          $makeNsis = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $makeNsis) { throw "NSIS makensis.exe was not found after installation." }
+          Split-Path $makeNsis | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $makeNsis /VERSION
+
+      - name: Stamp app version for updater
+        shell: pwsh
+        run: |
+          $path = "stanky_market/updater.py"
+          $content = Get-Content $path -Raw
+          $content = $content -replace 'APP_VERSION = ".*?"', "APP_VERSION = `"$env:VERSION_NUMBER`""
+          Set-Content -Path $path -Value $content -Encoding UTF8
+
+      - name: Syntax check
+        shell: pwsh
+        run: |
+          python -m py_compile main.py stanky_market/app.py stanky_market/db.py stanky_market/ui/theme.py stanky_market/ui/theme_assets.py stanky_market/updater.py
+
+      - name: Build Windows release files
+        shell: pwsh
+        run: |
+          .\scripts\build_release.ps1 -Version $env:RELEASE_TAG
+
+      - name: Print dist tree and release files
+        shell: pwsh
+        run: |
+          Write-Host "dist tree:"
+          if (Test-Path dist) { tree dist /F } else { throw "dist folder was not created." }
+          Write-Host "release_artifacts files:"
+          if (Test-Path release_artifacts) {
+            Get-ChildItem release_artifacts -File | Sort-Object Name | ForEach-Object {
+              Write-Host " - $($_.Name) [$([math]::Round($_.Length / 1MB, 2)) MB]"
+            }
+          } else {
+            throw "release_artifacts folder was not created."
+          }
+
+      - name: Verify expected artifacts
+        shell: pwsh
+        run: |
+          $portable = "release_artifacts\StankyTools-Portable-$env:RELEASE_TAG.zip"
+          $installer = "release_artifacts\StankyTools-Setup-$env:RELEASE_TAG.exe"
+          if (-not (Test-Path $portable)) { throw "Missing portable ZIP: $portable" }
+          if (-not (Test-Path $installer)) { throw "Missing installer EXE: $installer" }
+          if ((Get-Item $portable).Length -lt 1MB) { throw "Portable ZIP is unexpectedly small." }
+          if ((Get-Item $installer).Length -lt 1MB) { throw "Installer EXE is unexpectedly small." }
+
+      - name: Smoke test portable build without Python on PATH
+        shell: pwsh
+        run: |
+          $portable = Resolve-Path "release_artifacts\StankyTools-Portable-$env:RELEASE_TAG.zip"
+          $testRoot = Join-Path $env:RUNNER_TEMP "portable-smoke"
+          Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+          Expand-Archive -LiteralPath $portable -DestinationPath $testRoot -Force
+          $exe = Get-ChildItem $testRoot -Filter StankyTools.exe -Recurse -File | Select-Object -First 1
+          if (-not $exe) { throw "Portable ZIP does not contain StankyTools.exe." }
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
+          $process = Start-Process -FilePath $exe.FullName -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 8
+          if ($process.HasExited -and $process.ExitCode -ne 0) { throw "Portable app exited during smoke test with code $($process.ExitCode)." }
+          if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+
+      - name: Smoke test installer build without Python on PATH
+        shell: pwsh
+        run: |
+          $installer = Resolve-Path "release_artifacts\StankyTools-Setup-$env:RELEASE_TAG.exe"
+          $installDir = Join-Path $env:RUNNER_TEMP "StankyToolsInstall"
+          Remove-Item $installDir -Recurse -Force -ErrorAction SilentlyContinue
+          $process = Start-Process -FilePath $installer -ArgumentList "/S", "/D=$installDir" -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Installer exited with code $($process.ExitCode)." }
+          $exe = Get-ChildItem $installDir -Filter StankyTools.exe -Recurse -File | Select-Object -First 1
+          if (-not $exe) { throw "Installed app does not contain StankyTools.exe." }
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
+          $app = Start-Process -FilePath $exe.FullName -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 8
+          if ($app.HasExited -and $app.ExitCode -ne 0) { throw "Installed app exited during smoke test with code $($app.ExitCode)." }
+          if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force }
+
+      - name: Upload Windows release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: StankyTools-Windows-${{ env.RELEASE_TAG }}
+          path: |
+            release_artifacts/StankyTools-Portable-${{ env.RELEASE_TAG }}.zip
+            release_artifacts/StankyTools-Setup-${{ env.RELEASE_TAG }}.exe
+          if-no-files-found: error
+
+      - name: Publish public GitHub release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: StankylegTools/StankyTools-Releases
+          token: ${{ secrets.PUBLIC_RELEASES_TOKEN }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: StankyTools ${{ env.RELEASE_TAG }}
+          body: |
+            Download the Windows installer or portable ZIP below.
+
+            The app updater reads this public releases repo. Source code is not published here; only compiled release files are attached.
+          draft: false
+          prerelease: false
+          files: |
+            release_artifacts/StankyTools-Portable-${{ env.RELEASE_TAG }}.zip
+            release_artifacts/StankyTools-Setup-${{ env.RELEASE_TAG }}.exe
+          fail_on_unmatched_files: true
