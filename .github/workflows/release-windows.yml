@@ -205,6 +205,7 @@ jobs:
           repository: ${{ env.PUBLIC_RELEASE_REPOSITORY }}
           token: ${{ secrets.PUBLIC_RELEASES_TOKEN }}
           tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: main
           name: StankyTools ${{ env.RELEASE_TAG }}
           body: |
             Download the Windows installer or portable ZIP below.
