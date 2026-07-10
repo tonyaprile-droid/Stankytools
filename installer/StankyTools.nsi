@@ -29,8 +29,6 @@ VIAddVersionKey "FileVersion" "${APP_VERSION}"
 VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 
 !define MUI_ABORTWARNING
-!define MUI_ICON "assets\app.ico"
-!define MUI_UNICON "assets\app.ico"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -45,14 +43,10 @@ VIAddVersionKey "ProductVersion" "${APP_VERSION}"
 Section "Install StankyTools" SEC_MAIN
     SetOutPath "$INSTDIR"
 
-    ; Support a PyInstaller onedir build.
     !if /FileExists "dist\StankyTools\StankyTools.exe"
         File /r "dist\StankyTools\*.*"
-
-    ; Support a PyInstaller onefile build.
     !else if /FileExists "dist\StankyTools.exe"
         File "/oname=${APP_EXE}" "dist\StankyTools.exe"
-
     !else
         !error "StankyTools build output was not found. Expected dist\StankyTools.exe or dist\StankyTools\StankyTools.exe."
     !endif
@@ -81,6 +75,7 @@ Section "Install StankyTools" SEC_MAIN
         "UninstallString" '"$INSTDIR\Uninstall.exe"'
 
     CreateDirectory "$SMPROGRAMS\${APP_NAME}"
+
     CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" \
         "$INSTDIR\${APP_EXE}"
 
