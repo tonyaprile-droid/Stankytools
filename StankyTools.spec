@@ -5,29 +5,57 @@ from pathlib import Path
 
 project_root = Path.cwd()
 
-datas = [
-    ("stanky_market/assets/themes", "stanky_market/assets/themes"),
-    ("stanky_market/assets/icons", "stanky_market/assets/icons"),
-    ("data/deep_desert_map.png", "data"),
-    ("data/hagga_basin_map.png", "data"),
-]
+datas = []
+
+
+def add_data(source, destination):
+    path = project_root / source
+    if path.exists():
+        datas.append((str(path), destination))
+        print(f"Including: {source}")
+    else:
+        print(f"Skipping missing asset: {source}")
+
+
+# Optional assets
+add_data(
+    "stanky_market/assets/themes",
+    "stanky_market/assets/themes"
+)
+
+add_data(
+    "data/deep_desert_map.png",
+    "data"
+)
+
+add_data(
+    "data/hagga_basin_map.png",
+    "data"
+)
 
 catalog_db = project_root / "assets" / "catalog" / "catalog.sqlite3"
 if catalog_db.exists():
-    datas.append((str(catalog_db), "assets/catalog"))
+    datas.append(
+        (str(catalog_db), "assets/catalog")
+    )
 
 hiddenimports = collect_submodules("PySide6")
 
 a = Analysis(
     ["main.py"],
-    pathex=[],
+    pathex=[str(project_root)],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tests"],
+    excludes=[
+        "tests",
+        "tkinter",
+        "matplotlib.tests",
+        "numpy.tests",
+    ],
     noarchive=False,
 )
 
@@ -40,6 +68,7 @@ exe = EXE(
     exclude_binaries=True,
     name="StankyTools",
     debug=False,
+    bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     console=False,
