@@ -32,9 +32,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSpinBox,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
+
+from .ui.tactical_theme import theme_colors
 
 
 @dataclass
@@ -131,7 +134,8 @@ class ReticleOverlay(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self._display_mode = "text"
-        self.setFixedSize(116, 32)
+        self._friendly_label = "HOMEBOY"
+        self.setFixedSize(132, 34)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
@@ -143,9 +147,16 @@ class ReticleOverlay(QWidget):
     def set_display_mode(self, mode: str) -> None:
         self._display_mode = "bar" if str(mode).lower() == "bar" else "text"
         if self._display_mode == "bar":
-            self.setFixedSize(88, 8)
+            self.setFixedSize(112, 12)
         else:
-            self.setFixedSize(116, 32)
+            self.setFixedSize(132, 34)
+
+    def set_friendly_label(self, text: str) -> None:
+        label = " ".join(str(text or "").split()).strip() or "HOMEBOY"
+        self._friendly_label = label[:24]
+        if self._display_mode != "bar":
+            width = max(132, min(240, 58 + len(self._friendly_label) * 9))
+            self.setFixedSize(width, 34)
 
     def set_status(self, status: str, detected_color: str = "NONE") -> None:
         if status != "FRIENDLY":
@@ -158,12 +169,12 @@ class ReticleOverlay(QWidget):
                 "QLabel {"
                 "background:rgba(74, 226, 125, 210);"
                 "border:0px;"
-                "border-radius:2px;"
+                "border-radius:3px;"
                 "}"
             )
             return
 
-        self.label.setText("HOMEBOY")
+        self.label.setText(self._friendly_label)
         self.label.setStyleSheet(
             "QLabel {"
             "color:rgba(221,255,232,235);"
@@ -214,80 +225,87 @@ class ReticleMonitorPage(QWidget):
         self.refresh_monitors()
 
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 24)
+        self.setObjectName("ReticleMonitorPage")
+        self._status_result = DetectionResult()
+        self._theme_widgets: list[QWidget] = []
+        root = QHBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
         root.setSpacing(14)
 
-        header = QLabel("RETICLE MONITOR")
-        header.setStyleSheet("font-size:28px; font-weight:900; letter-spacing:2px;")
-        sub = QLabel(
-            "Passive screen-color detection only. No game memory, process injection, targeting, or automatic input. "
-            "Emergency disable: Ctrl+Alt+F12."
-        )
-        sub.setWordWrap(True)
-        sub.setStyleSheet("color:#BDB4A5; font-size:13px;")
-        root.addWidget(header)
-        root.addWidget(sub)
+        left_column = QVBoxLayout()
+        left_column.setContentsMargins(0, 0, 0, 0)
+        left_column.setSpacing(12)
+        right_column = QVBoxLayout()
+        right_column.setContentsMargins(0, 0, 0, 0)
+        right_column.setSpacing(14)
 
-        controls = QFrame()
-        controls.setObjectName("Card")
-        grid = QGridLayout(controls)
-        grid.setContentsMargins(18, 18, 18, 18)
-        grid.setHorizontalSpacing(22)
-        grid.setVerticalSpacing(12)
-
-        form = QFormLayout()
+        settings_card, settings_layout = self._make_card("MONITOR SETTINGS", "O")
         self.monitor_combo = QComboBox()
         self.monitor_combo.currentIndexChanged.connect(self._monitor_changed)
-        self.refresh_button = QPushButton("Refresh Monitors")
+        self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_monitors)
-        monitor_row = QHBoxLayout()
-        monitor_row.addWidget(self.monitor_combo, 1)
-        monitor_row.addWidget(self.refresh_button)
-        monitor_wrap = QWidget()
-        monitor_wrap.setLayout(monitor_row)
-        form.addRow("Game monitor", monitor_wrap)
+        monitor_row = QWidget()
+        monitor_row_layout = QHBoxLayout(monitor_row)
+        monitor_row_layout.setContentsMargins(0, 0, 0, 0)
+        monitor_row_layout.setSpacing(8)
+        monitor_row_layout.addWidget(self.monitor_combo, 1)
+        monitor_row_layout.addWidget(self.refresh_button, 0)
+        settings_layout.addWidget(self._setting_row("[]", "Game monitor", monitor_row))
 
         self.box_size = QSpinBox()
         self.box_size.setRange(20, 300)
         self.box_size.setSuffix(" px")
-        form.addRow("Center capture box", self.box_size)
+        settings_layout.addWidget(self._setting_row("+", "Center capture box", self.box_size))
 
         self.capture_fps = QSpinBox()
         self.capture_fps.setRange(5, 30)
         self.capture_fps.setSuffix(" FPS")
-        form.addRow("Capture rate", self.capture_fps)
+        settings_layout.addWidget(self._setting_row("~", "Capture rate", self.capture_fps))
 
         self.minimum_pixels = QSpinBox()
         self.minimum_pixels.setRange(2, 3000)
-        form.addRow("Minimum reticle pixels", self.minimum_pixels)
+        settings_layout.addWidget(self._setting_row("::", "Minimum reticle pixels", self.minimum_pixels))
 
         self.shape_confidence = QSpinBox()
         self.shape_confidence.setRange(40, 95)
         self.shape_confidence.setSuffix(" %")
-        form.addRow("Crosshair shape confidence", self.shape_confidence)
+        settings_layout.addWidget(self._setting_row("o", "Crosshair shape confidence", self.shape_confidence))
 
         self.center_tolerance = QSpinBox()
         self.center_tolerance.setRange(2, 30)
         self.center_tolerance.setSuffix(" px")
-        form.addRow("Center tolerance", self.center_tolerance)
+        settings_layout.addWidget(self._setting_row("+", "Center tolerance", self.center_tolerance))
 
         self.required_frames = QSpinBox()
         self.required_frames.setRange(1, 5)
-        form.addRow("Required consecutive frames", self.required_frames)
+        settings_layout.addWidget(self._setting_row("=", "Required consecutive frames", self.required_frames))
 
         self.green_slider, self.green_value = self._make_slider(20, 100)
-        form.addRow("Friendly-color sensitivity", self._slider_row(self.green_slider, self.green_value))
+        settings_layout.addWidget(self._setting_row("*", "Friendly-color sensitivity", self._slider_row(self.green_slider, self.green_value)))
 
         self.calibration = QCheckBox("Calibration mode")
         self.calibration.setToolTip("Continuously shows the center capture region and pixel counts.")
-        self.overlay_enabled = QCheckBox("Transparent click-through overlay")
-        self.overlay_style = QComboBox()
-        self.overlay_style.addItem("Text — HOMEBOY", "text")
-        self.overlay_style.addItem("Green bar", "bar")
-        self.overlay_style.currentIndexChanged.connect(self._overlay_style_changed)
-        self.sound_enabled = QCheckBox("Play sound when targeting a friendly")
+        settings_layout.addWidget(self._checkbox_row("Calibration mode", "Show detection preview and analysis", self.calibration))
 
+        self.overlay_enabled = QCheckBox("Transparent click-through overlay")
+        settings_layout.addWidget(self._checkbox_row("Transparent click-through overlay", "Allow clicks to pass through overlay", self.overlay_enabled))
+
+        self.overlay_style = QComboBox()
+        self.overlay_style.addItem("Text - HOMEBOY", "text")
+        self.overlay_style.addItem("Green Bar", "bar")
+        self.overlay_style.currentIndexChanged.connect(self._overlay_style_changed)
+        settings_layout.addWidget(self._setting_row("/", "Overlay style", self.overlay_style))
+
+        self.friendly_label = QLineEdit()
+        self.friendly_label.setMaxLength(24)
+        self.friendly_label.setPlaceholderText("HOMEBOY")
+        self.friendly_label.editingFinished.connect(self._friendly_label_changed)
+        settings_layout.addWidget(self._setting_row("T", "Friendly label", self.friendly_label))
+        left_column.addWidget(settings_card, 0)
+
+        sound_card, sound_layout = self._make_card("FRIENDLY SOUND", "))")
+        self.sound_enabled = QCheckBox("Play sound when targeting a friendly")
+        sound_layout.addWidget(self.sound_enabled)
         self.sound_path = QLineEdit()
         self.sound_path.setReadOnly(True)
         self.sound_path.setPlaceholderText("Default Windows beep")
@@ -295,7 +313,7 @@ class ReticleMonitorPage(QWidget):
             "Select a common audio or video media file. The audio track will play; "
             "actual format support depends on Windows codecs. Leave empty for the default beep."
         )
-        self.sound_browse = QPushButton("Choose…")
+        self.sound_browse = QPushButton("Choose...")
         self.sound_browse.clicked.connect(self._choose_sound)
         self.sound_test = QPushButton("Test")
         self.sound_test.clicked.connect(self._test_sound)
@@ -303,58 +321,257 @@ class ReticleMonitorPage(QWidget):
         self.sound_clear.clicked.connect(self._clear_sound)
         sound_row = QHBoxLayout()
         sound_row.setContentsMargins(0, 0, 0, 0)
+        sound_row.setSpacing(8)
         sound_row.addWidget(self.sound_path, 1)
         sound_row.addWidget(self.sound_browse)
         sound_row.addWidget(self.sound_test)
         sound_row.addWidget(self.sound_clear)
-        sound_wrap = QWidget()
-        sound_wrap.setLayout(sound_row)
+        sound_layout.addLayout(sound_row)
+        left_column.addWidget(sound_card, 0)
 
-        form.addRow(self.calibration)
-        form.addRow(self.overlay_enabled)
-        form.addRow("Overlay style", self.overlay_style)
-        form.addRow(self.sound_enabled)
-        form.addRow("Friendly sound", sound_wrap)
-
-        buttons = QHBoxLayout()
-        self.start_button = QPushButton("Start Monitor")
-        self.start_button.setObjectName("PrimaryButton")
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.setSpacing(12)
+        self.start_button = QPushButton("START MONITOR")
+        self.start_button.setObjectName("ReticleStartButton")
         self.start_button.clicked.connect(self.start_monitor)
-        self.stop_button = QPushButton("Stop")
-        self.stop_button.setObjectName("DangerButton")
+        self.start_button.setMinimumHeight(54)
+        self.stop_button = QPushButton("STOP")
+        self.stop_button.setObjectName("ReticleStopButton")
         self.stop_button.clicked.connect(self.stop_monitor)
         self.stop_button.setEnabled(False)
-        buttons.addWidget(self.start_button)
-        buttons.addWidget(self.stop_button)
-        form.addRow(buttons)
+        self.stop_button.setMinimumHeight(54)
+        button_row.addWidget(self.start_button, 1)
+        button_row.addWidget(self.stop_button, 1)
+        left_column.addLayout(button_row)
+        left_column.addStretch(1)
 
-        grid.addLayout(form, 0, 0)
-
-        output_box = QVBoxLayout()
+        self.status_card = QFrame()
+        self.status_card.setObjectName("ReticleStatusCard")
+        status_layout = QHBoxLayout(self.status_card)
+        status_layout.setContentsMargins(20, 18, 20, 18)
+        status_layout.setSpacing(16)
+        self.status_icon = QLabel("O")
+        self.status_icon.setObjectName("ReticleStatusIcon")
+        self.status_icon.setAlignment(Qt.AlignCenter)
+        self.status_icon.setFixedSize(62, 62)
+        text_box = QVBoxLayout()
+        text_box.setSpacing(4)
         self.status_label = QLabel("NO TARGET")
-        self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setMinimumHeight(108)
-        output_box.addWidget(self.status_label)
+        self.status_label.setObjectName("ReticleStatusTitle")
+        self.status_subtitle = QLabel("Waiting for reticle...")
+        self.status_subtitle.setObjectName("ReticleStatusSubtitle")
+        text_box.addWidget(self.status_label)
+        text_box.addWidget(self.status_subtitle)
+        self.status_reticle_icon = QLabel("+")
+        self.status_reticle_icon.setObjectName("ReticleStatusReticle")
+        self.status_reticle_icon.setAlignment(Qt.AlignCenter)
+        self.status_reticle_icon.setFixedSize(58, 58)
+        status_layout.addWidget(self.status_icon)
+        status_layout.addLayout(text_box, 1)
+        status_layout.addWidget(self.status_reticle_icon)
+        right_column.addWidget(self.status_card, 0)
 
-        self.preview = QLabel("Preview appears while monitoring")
+        self.preview_card = QFrame()
+        self.preview_card.setObjectName("ReticlePreviewCard")
+        preview_layout = QVBoxLayout(self.preview_card)
+        preview_layout.setContentsMargins(18, 18, 18, 0)
+        preview_layout.setSpacing(0)
+        self.preview = QLabel()
+        self.preview.setObjectName("ReticlePreview")
         self.preview.setAlignment(Qt.AlignCenter)
-        self.preview.setMinimumSize(300, 300)
-        self.preview.setStyleSheet("background:#050505; border:1px solid #6b6257; border-radius:10px;")
-        output_box.addWidget(self.preview, 1)
-
-        self.metrics = QLabel("Crosshair: No | Shape: 0% | Yellow: 0 | Green: 0 | Light Blue: 0 | Orange: 0 | Purple: 0")
+        self.preview.setMinimumSize(460, 420)
+        self.preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        preview_layout.addWidget(self.preview, 1)
+        self.metrics = QLabel()
+        self.metrics.setObjectName("ReticleMetrics")
+        self.metrics.setTextFormat(Qt.RichText)
         self.metrics.setAlignment(Qt.AlignCenter)
-        self.metrics.setStyleSheet("color:#BDB4A5; font-weight:700;")
-        output_box.addWidget(self.metrics)
-        grid.addLayout(output_box, 0, 1)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        root.addWidget(controls, 1)
+        self.metrics.setMinimumHeight(36)
+        preview_layout.addWidget(self.metrics, 0)
+        right_column.addWidget(self.preview_card, 1)
 
         self.state_note = QLabel("Monitor stopped")
-        self.state_note.setStyleSheet("color:#BDB4A5;")
-        root.addWidget(self.state_note)
+        self.state_note.setObjectName("ReticleStateNote")
+        left_column.addWidget(self.state_note, 0)
+
+        root.addLayout(left_column, 49)
+        root.addLayout(right_column, 51)
+        self.apply_theme()
+        self._set_preview_placeholder()
         self._apply_status(DetectionResult())
+
+    def _make_card(self, title: str, icon: str) -> tuple[QFrame, QVBoxLayout]:
+        card = QFrame()
+        card.setObjectName("ReticleCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 16)
+        layout.setSpacing(8)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(10)
+        icon_label = QLabel(icon)
+        icon_label.setObjectName("ReticleSectionIcon")
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setFixedWidth(28)
+        title_label = QLabel(title)
+        title_label.setObjectName("ReticleSectionTitle")
+        header.addWidget(icon_label)
+        header.addWidget(title_label, 1)
+        layout.addLayout(header)
+        divider = QFrame()
+        divider.setObjectName("ReticleDivider")
+        divider.setFixedHeight(1)
+        layout.addWidget(divider)
+        self._theme_widgets.extend([card, icon_label, title_label, divider])
+        return card, layout
+
+    def _setting_row(self, icon: str, label: str, control: QWidget) -> QWidget:
+        row = QFrame()
+        row.setObjectName("ReticleSettingRow")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(10)
+        icon_label = QLabel(icon)
+        icon_label.setObjectName("ReticleRowIcon")
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setFixedWidth(28)
+        text = QLabel(label)
+        text.setObjectName("ReticleRowLabel")
+        control.setMinimumHeight(34)
+        layout.addWidget(icon_label)
+        layout.addWidget(text, 1)
+        layout.addWidget(control, 2)
+        self._theme_widgets.extend([row, icon_label, text, control])
+        return row
+
+    def _checkbox_row(self, label: str, description: str, checkbox: QCheckBox) -> QWidget:
+        row = QFrame()
+        row.setObjectName("ReticleSettingRow")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(10)
+        checkbox.setText("")
+        text_box = QVBoxLayout()
+        text_box.setSpacing(1)
+        title = QLabel(label)
+        title.setObjectName("ReticleRowLabel")
+        desc = QLabel(description)
+        desc.setObjectName("ReticleRowDescription")
+        text_box.addWidget(title)
+        text_box.addWidget(desc)
+        layout.addWidget(checkbox, 0, Qt.AlignTop)
+        layout.addLayout(text_box, 1)
+        self._theme_widgets.extend([row, title, desc, checkbox])
+        return row
+
+    def refresh_theme_assets(self, theme_key: str | None = None) -> None:
+        self.apply_theme(theme_key)
+
+    def apply_theme(self, theme_key: str | None = None) -> None:
+        key = theme_key or self._get("color_theme", "dune") or "dune"
+        colors = theme_colors(key)
+        accent = colors.get("accent", "#FFCB45")
+        accent_soft = colors.get("accent_soft", "rgba(255,203,69,0.58)")
+        glow = colors.get("glow", "rgba(255,203,69,0.18)")
+        bg = colors.get("background", "#17130D")
+        panel = colors.get("panel", "#241D12")
+        text = colors.get("text", "#ECECEC")
+        muted = colors.get("muted", "#A7A09A")
+        success = colors.get("success", "#89FF45")
+        danger = colors.get("danger", "#FF5555")
+        self._accent = accent
+        self._muted = muted
+        self.setStyleSheet(f"""
+        QWidget#ReticleMonitorPage {{ background:{bg}; color:{text}; }}
+        QFrame#ReticleCard, QFrame#ReticleStatusCard, QFrame#ReticlePreviewCard {{
+            background:rgba(18,18,15,214);
+            border:1px solid {accent_soft};
+            border-radius:11px;
+        }}
+        QFrame#ReticleCard:hover, QFrame#ReticleStatusCard:hover, QFrame#ReticlePreviewCard:hover {{ border-color:{accent}; }}
+        QLabel#ReticleSectionIcon, QLabel#ReticleSectionTitle {{ color:{accent}; font-weight:900; }}
+        QLabel#ReticleSectionTitle {{ font-size:16px; letter-spacing:0.8px; }}
+        QFrame#ReticleDivider {{ background:{accent_soft}; border:none; }}
+        QFrame#ReticleSettingRow {{ background:rgba(255,255,255,0.018); border:none; border-radius:7px; min-height:38px; }}
+        QFrame#ReticleSettingRow:hover {{ background:{glow}; }}
+        QLabel#ReticleRowIcon {{ color:{accent}; font-size:15px; font-weight:900; }}
+        QLabel#ReticleRowLabel {{ color:{text}; font-size:14px; font-weight:650; }}
+        QLabel#ReticleRowDescription {{ color:{muted}; font-size:12px; }}
+        QLineEdit, QComboBox, QSpinBox {{
+            background:rgba(5,7,8,150); color:{text}; border:1px solid {accent_soft};
+            border-radius:6px; padding:6px 9px; selection-background-color:{accent};
+        }}
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus {{ border-color:{accent}; }}
+        QPushButton {{ background:rgba(255,255,255,0.045); color:{text}; border:1px solid {accent_soft}; border-radius:7px; padding:7px 12px; font-weight:800; }}
+        QPushButton:hover {{ background:{glow}; border-color:{accent}; color:#FFFFFF; }}
+        QPushButton:pressed {{ background:{accent_soft}; }}
+        QPushButton:disabled {{ color:rgba(255,255,255,0.35); border-color:rgba(255,255,255,0.10); background:rgba(255,255,255,0.025); }}
+        QPushButton#ReticleStartButton {{ background:{glow}; border:1px solid {accent}; color:#FFFFFF; font-size:15px; font-weight:900; }}
+        QPushButton#ReticleStartButton:hover {{ background:{accent_soft}; }}
+        QPushButton#ReticleStopButton {{ background:rgba(150,40,34,0.34); border:1px solid {danger}; color:#FFDAD6; font-size:15px; font-weight:900; }}
+        QPushButton#ReticleStopButton:hover {{ background:rgba(190,54,46,0.50); color:#FFFFFF; }}
+        QCheckBox {{ color:{text}; font-size:14px; spacing:8px; }}
+        QCheckBox::indicator {{ width:17px; height:17px; border-radius:4px; border:1px solid {accent_soft}; background:rgba(5,7,8,170); }}
+        QCheckBox::indicator:checked {{ background:{accent}; border-color:{accent}; }}
+        QSlider::groove:horizontal {{ height:6px; border-radius:3px; background:rgba(255,255,255,0.14); }}
+        QSlider::sub-page:horizontal {{ background:{accent}; border-radius:3px; }}
+        QSlider::handle:horizontal {{ width:16px; height:16px; margin:-6px 0; border-radius:8px; background:{panel}; border:2px solid {accent}; }}
+        QLabel#ReticleStatusIcon {{ background:{glow}; border:1px solid {accent_soft}; border-radius:31px; color:{accent}; font-size:26px; font-weight:900; }}
+        QLabel#ReticleStatusTitle {{ color:{text}; font-size:24px; font-weight:900; letter-spacing:1px; }}
+        QLabel#ReticleStatusSubtitle {{ color:{muted}; font-size:15px; font-weight:650; }}
+        QLabel#ReticleStatusReticle {{ color:rgba(255,255,255,0.24); font-size:42px; font-weight:300; }}
+        QFrame#ReticlePreviewCard {{ border-color:{accent}; background:rgba(0,0,0,180); }}
+        QLabel#ReticlePreview {{ color:{muted}; font-size:15px; font-weight:650; background:transparent; }}
+        QLabel#ReticleMetrics {{ color:{text}; background:rgba(0,0,0,130); border-top:1px solid {accent_soft}; font-size:12px; font-weight:700; }}
+        QLabel#ReticleStateNote {{ color:{muted}; font-size:12px; font-weight:650; }}
+        """)
+        self._success_color = success
+        self._danger_color = danger
+        self._render_status_display(getattr(self, "_status_result", DetectionResult()))
+
+    def _set_preview_placeholder(self) -> None:
+        if not hasattr(self, "preview"):
+            return
+        self.preview.setPixmap(QPixmap())
+        self.preview.setText("+\n\nPREVIEW APPEARS WHILE MONITORING")
+
+    def _metrics_html(self, result: DetectionResult) -> str:
+        colors = {
+            "Yellow": ("#FFD94A", result.yellow_pixels),
+            "Green": ("#6FE36F", result.green_pixels),
+            "Light Blue": ("#72D8FF", result.cyan_pixels),
+            "Orange": ("#FF9347", result.orange_pixels),
+            "Purple": ("#B46CFF", result.purple_pixels),
+        }
+        parts = [
+            f"Crosshair: {'Yes' if result.crosshair_present else 'No'}",
+            f"Shape: {round(result.shape_confidence * 100)}%",
+        ]
+        for label, (color, value) in colors.items():
+            parts.append(f'<span style="color:{color};">&#9679;</span> {label}: {value}')
+        return "&nbsp;&nbsp;|&nbsp;&nbsp;".join(parts)
+
+    def _render_status_display(self, result: DetectionResult) -> None:
+        status_text = result.status
+        friendly = status_text == "FRIENDLY"
+        self.status_label.setText(self._clean_friendly_label(self.friendly_label.text()) if friendly else "NO TARGET")
+        self.status_subtitle.setText("Friendly reticle detected" if friendly else "Waiting for reticle...")
+        self.status_icon.setText("O" if friendly else "o")
+        self.metrics.setText(self._metrics_html(result))
+        if friendly:
+            self.status_icon.setStyleSheet(
+                "background:rgba(74,226,125,0.22); border:1px solid rgba(100,235,145,0.72); "
+                "border-radius:31px; color:#7CFF9B; font-size:26px; font-weight:900;"
+            )
+            self.status_label.setStyleSheet("color:#E5FFED; font-size:24px; font-weight:900; letter-spacing:1px;")
+        else:
+            accent = getattr(self, "_accent", "#FFCB45")
+            self.status_icon.setStyleSheet(
+                f"background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.16); "
+                f"border-radius:31px; color:{accent}; font-size:26px; font-weight:900;"
+            )
+            self.status_label.setStyleSheet("font-size:24px; font-weight:900; letter-spacing:1px;")
 
     def _make_slider(self, low: int, high: int):
         slider = QSlider(Qt.Horizontal)
@@ -388,6 +605,9 @@ class ReticleMonitorPage(QWidget):
         overlay_index = self.overlay_style.findData(overlay_mode)
         self.overlay_style.setCurrentIndex(overlay_index if overlay_index >= 0 else 0)
         self._overlay.set_display_mode(self.overlay_style.currentData() or "text")
+        friendly_label = self._clean_friendly_label(self._get("reticle_friendly_label", "HOMEBOY") or "HOMEBOY")
+        self.friendly_label.setText(friendly_label)
+        self._overlay.set_friendly_label(friendly_label)
         self.sound_enabled.setChecked((self._get("reticle_sound", "0") or "0") == "1")
         stored_sound = self._get("reticle_sound_path", "") or ""
         self.sound_path.setText(stored_sound if os.path.isfile(stored_sound) else "")
@@ -404,6 +624,7 @@ class ReticleMonitorPage(QWidget):
             "reticle_calibration": int(self.calibration.isChecked()),
             "reticle_overlay": int(self.overlay_enabled.isChecked()),
             "reticle_overlay_style": self.overlay_style.currentData() or "text",
+            "reticle_friendly_label": self._clean_friendly_label(self.friendly_label.text()),
             "reticle_sound": int(self.sound_enabled.isChecked()),
             "reticle_sound_path": self.sound_path.text().strip(),
             "reticle_monitor_index": self.monitor_combo.currentIndex(),
@@ -419,7 +640,7 @@ class ReticleMonitorPage(QWidget):
             geometry = screen.geometry()
             primary = " (Primary)" if screen is QApplication.primaryScreen() else ""
             self.monitor_combo.addItem(
-                f"{index + 1}: {screen.name()} — {geometry.width()}×{geometry.height()}{primary}",
+                f"{index + 1}: {screen.name()} - {geometry.width()}x{geometry.height()}{primary}",
                 index,
             )
         if self.monitor_combo.count():
@@ -439,6 +660,17 @@ class ReticleMonitorPage(QWidget):
             screen = self.selected_screen()
             if screen:
                 self._overlay.place_on_screen(screen)
+
+    @staticmethod
+    def _clean_friendly_label(value: str) -> str:
+        return " ".join(str(value or "").split()).strip()[:24] or "HOMEBOY"
+
+    def _friendly_label_changed(self) -> None:
+        label = self._clean_friendly_label(self.friendly_label.text())
+        self.friendly_label.setText(label)
+        self._overlay.set_friendly_label(label)
+        self._set("reticle_friendly_label", label)
+        self._render_status_display(getattr(self, "_status_result", DetectionResult()))
 
     def _overlay_style_changed(self, *_args) -> None:
         mode = self.overlay_style.currentData() or "text"
@@ -507,12 +739,13 @@ class ReticleMonitorPage(QWidget):
         if screen is None:
             self.state_note.setText("No monitor is available for capture.")
             return
+        self._friendly_label_changed()
         self._save_settings()
         interval = max(33, round(1000 / self.capture_fps.value()))
         self.capture_timer.start(interval)
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.state_note.setText("Monitoring visible center-screen pixels only — Ctrl+Alt+F12 stops immediately")
+        self.state_note.setText("Monitoring visible center-screen pixels only - Ctrl+Alt+F12 stops immediately")
         # The overlay remains hidden until a visible friendly reticle is detected.
         self._overlay.hide()
         self.capture_frame()
@@ -523,13 +756,14 @@ class ReticleMonitorPage(QWidget):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.state_note.setText("Monitor stopped")
+        self._set_preview_placeholder()
         self._apply_status(DetectionResult())
 
     def emergency_stop(self) -> None:
         self.stop_monitor()
         self.overlay_enabled.setChecked(False)
         self._save_settings()
-        self.state_note.setText("EMERGENCY DISABLED — press Start Monitor to enable again")
+        self.state_note.setText("EMERGENCY DISABLED - press Start Monitor to enable again")
 
     def capture_frame(self) -> None:
         screen = self.selected_screen()
@@ -556,8 +790,7 @@ class ReticleMonitorPage(QWidget):
             preview = pixmap.scaled(self.preview.size(), Qt.KeepAspectRatio, Qt.FastTransformation)
             self.preview.setPixmap(preview)
         else:
-            self.preview.clear()
-            self.preview.setText("Enable Calibration mode to show the capture region")
+            self._set_preview_placeholder()
 
     def _detect(self, image: QImage) -> DetectionResult:
         """Detect a centered crosshair shape first, then classify only its pixels.
@@ -722,26 +955,8 @@ class ReticleMonitorPage(QWidget):
         )
 
     def _apply_status(self, result: DetectionResult) -> None:
-        status_text = result.status
-        self.status_label.setText("HOMEBOY" if status_text == "FRIENDLY" else status_text)
-        if status_text == "FRIENDLY":
-            self.status_label.setStyleSheet(
-                "color:#DFFFE8; background:rgba(8,24,14,150);"
-                "border:1px solid rgba(80,220,125,130); border-radius:8px;"
-                "font-size:26px; font-weight:800; letter-spacing:2px;"
-            )
-        else:
-            self.status_label.setStyleSheet(
-                "color:#8D877D; background:rgba(12,12,12,0.72); border:1px solid rgba(255,255,255,20);"
-                "border-radius:14px; font-size:28px; font-weight:800; letter-spacing:2px;"
-            )
-        self.metrics.setText(
-            f"Crosshair: {'Yes' if result.crosshair_present else 'No'} | "
-            f"Shape: {round(result.shape_confidence * 100)}% | "
-            f"Yellow: {result.yellow_pixels} | Green: {result.green_pixels} | Light Blue: {result.cyan_pixels} | "
-            f"Orange: {result.orange_pixels} | Purple: {result.purple_pixels} | "
-            f"Color: {round(result.confidence * 100)}%"
-        )
+        self._status_result = result
+        self._render_status_display(result)
         state_key = f"{result.status}:{result.detected_color}"
         if state_key == self._pending_state:
             self._pending_frames += 1

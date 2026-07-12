@@ -4704,6 +4704,9 @@ class MainWindow(QMainWindow):
     def _build_reticle_monitor_page(self) -> QWidget:
         page, layout = self._page_shell("Reticle Monitor", "")
         self.reticle_monitor_widget = ReticleMonitorPage(db.get_setting, db.set_setting, page)
+        if not hasattr(self, "theme_asset_widgets"):
+            self.theme_asset_widgets = []
+        self.theme_asset_widgets.append(self.reticle_monitor_widget)
         layout.addWidget(self.reticle_monitor_widget, 1)
         return page
 
