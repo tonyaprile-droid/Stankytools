@@ -1,0 +1,296 @@
+[
+  {
+    "name": "Vehicles Fabricator",
+    "category": "Utility",
+    "subcategory": "Fabricators",
+    "item_type": "Placeable",
+    "image_filename": "Vehicles_Fabricator.png"
+  },
+  {
+    "name": "Water Cistern",
+    "category": "Utility",
+    "subcategory": "Storage",
+    "item_type": "Placeable",
+    "image_filename": "Water_Cistern.png"
+  },
+  {
+    "name": "Weapons Fabricator",
+    "category": "Utility",
+    "subcategory": "Fabricators",
+    "item_type": "Placeable",
+    "image_filename": "Weapons_Fabricator.png"
+  },
+  {
+    "name": "Wind Turbine Directional",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Wind_Turbine_Directional.png"
+  },
+  {
+    "name": "Wind Turbine Omnidirectional",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Wind_Turbine_Omnidirectional.png"
+  },
+  {
+    "name": "Windtrap",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Windtrap.png"
+  },
+  {
+    "name": "Medium Chemical Refinery",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Medium_Chemical_Refinery.png"
+  },
+  {
+    "name": "Medium Ore Refinery",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Medium_Ore_Refinery.png"
+  },
+  {
+    "name": "Medium Spice Refinery",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Medium_Spice_Refinery.png"
+  },
+  {
+    "name": "Medium Storage Container",
+    "category": "Utility",
+    "subcategory": "Storage",
+    "item_type": "Placeable",
+    "image_filename": "Medium_Storage_Container.png"
+  },
+  {
+    "name": "Medium Water Cistern",
+    "category": "Utility",
+    "subcategory": "Storage",
+    "item_type": "Placeable",
+    "image_filename": "Medium_Water_Cistern.png"
+  },
+  {
+    "name": "Pentashield Surface Horizontal",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Pentashield_Surface_Horizontal.png"
+  },
+  {
+    "name": "Pentashield Surface Vertical",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Pentashield_Surface_Vertical.png"
+  },
+  {
+    "name": "Personal Fabricator",
+    "category": "Utility",
+    "subcategory": "Fabricators",
+    "item_type": "Placeable",
+    "image_filename": "Personal_Fabricator.png"
+  },
+  {
+    "name": "Recycler",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Recycler.png"
+  },
+  {
+    "name": "Repair Station",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Repair_Station.png"
+  },
+  {
+    "name": "Small Chemical Refinery",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Small_Chemical_Refinery.png"
+  },
+  {
+    "name": "Small Ore Refinery",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Small_Ore_Refinery.png"
+  },
+  {
+    "name": "Small Storage Container",
+    "category": "Utility",
+    "subcategory": "Storage",
+    "item_type": "Placeable",
+    "image_filename": "Small_Storage_Container.png"
+  },
+  {
+    "name": "Spice Refinery",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Spice_Refinery.png"
+  },
+  {
+    "name": "Spice-Powered Generator",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Spice_Powered_Generator.png"
+  },
+  {
+    "name": "Storage Container",
+    "category": "Utility",
+    "subcategory": "Storage",
+    "item_type": "Placeable",
+    "image_filename": "Storage_Container.png"
+  },
+  {
+    "name": "Sub-Fief Console",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Sub_Fief_Console.png"
+  },
+  {
+    "name": "Survival Fabricator",
+    "category": "Utility",
+    "subcategory": "Fabricators",
+    "item_type": "Placeable",
+    "image_filename": "Survival_Fabricator.png"
+  },
+  {
+    "name": "Advanced Fremen Deathstill",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Advanced_Fremen_Deathstill.png"
+  },
+  {
+    "name": "Advanced Garment Fabricator",
+    "category": "Utility",
+    "subcategory": "Fabricators",
+    "item_type": "Placeable",
+    "image_filename": "Advanced_Garment_Fabricator.png"
+  },
+  {
+    "name": "Advanced Sub-Fief Console",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Advanced_Sub_Fief_Console.png"
+  },
+  {
+    "name": "Advanced Survival Fabricator",
+    "category": "Utility",
+    "subcategory": "Fabricators",
+    "item_type": "Placeable",
+    "image_filename": "Advanced_Survival_Fabricator.png"
+  },
+  {
+    "name": "Advanced Vehicle Fabricator",
+    "category": "Utility",
+    "subcategory": "Fabricators",
+    "item_type": "Placeable",
+    "image_filename": "Advanced_Vehicle_Fabricator.png"
+  },
+  {
+    "name": "Advanced Weapons Fabricator",
+    "category": "Utility",
+    "subcategory": "Fabricators",
+    "item_type": "Placeable",
+    "image_filename": "Advanced_Weapons_Fabricator.png"
+  },
+  {
+    "name": "Augmentation Station",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Augmentation_Station.png"
+  },
+  {
+    "name": "Blood Purifier",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Blood_Purifier.png"
+  },
+  {
+    "name": "Chest",
+    "category": "Utility",
+    "subcategory": "Storage",
+    "item_type": "Placeable",
+    "image_filename": "Chest.png"
+  },
+  {
+    "name": "Fabricator",
+    "category": "Utility",
+    "subcategory": "Fabricators",
+    "item_type": "Placeable",
+    "image_filename": "Fabricator.png"
+  },
+  {
+    "name": "Fremen Deathstill",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Fremen_Deathstill.png"
+  },
+  {
+    "name": "Fuel-Powered Generator",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Fuel_Powered_Generator.png"
+  },
+  {
+    "name": "Garment Fabricator",
+    "category": "Utility",
+    "subcategory": "Fabricators",
+    "item_type": "Placeable",
+    "image_filename": "Garment_Fabricator.png"
+  },
+  {
+    "name": "Improved Blood Purifier",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Improved_Blood_Purifier.png"
+  },
+  {
+    "name": "Large Ore Refinery",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Large_Ore_Refinery.png"
+  },
+  {
+    "name": "Large Spice Refinery",
+    "category": "Utility",
+    "subcategory": "Refineries",
+    "item_type": "Placeable",
+    "image_filename": "Large_Spice_Refinery.png"
+  },
+  {
+    "name": "Large Water Cistern",
+    "category": "Utility",
+    "subcategory": "Storage",
+    "item_type": "Placeable",
+    "image_filename": "Large_Water_Cistern.png"
+  },
+  {
+    "name": "Large Windtrap",
+    "category": "Utility",
+    "subcategory": "Utilities",
+    "item_type": "Placeable",
+    "image_filename": "Large_Windtrap.png"
+  }
+]

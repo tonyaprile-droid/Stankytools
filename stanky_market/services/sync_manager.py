@@ -67,6 +67,7 @@ class SyncManager(QObject):
         w = self.window
         if hasattr(w, "notify"):
             w.notify("Syncing", "Sending saved changes in the background.", "info", 1800)
+        failed = False
         try:
             if "all" in pending or "poi" in pending or "base" in pending:
                 if hasattr(w, "sync_deep_desert_markers"):
@@ -86,14 +87,15 @@ class SyncManager(QObject):
             if hasattr(w, "notify"):
                 w.notify("Synced Successfully", "Guild data is up to date.", "success", 2200)
         except Exception as exc:
+            failed = True
             self.pending.update(pending)
             self.statusChanged.emit(f"Sync failed: {exc}")
-            _safe_set_text(getattr(w, "dashboard_sync_status", None), "SYNC STATUS: RETRY QUEUED")
+            _safe_set_text(getattr(w, "dashboard_sync_status", None), "SYNC STATUS: SAVED LOCALLY")
             if hasattr(w, "notify"):
-                w.notify("Sync Queued", "Network sync failed; changes remain saved locally and will retry.", "warning", 4200)
-            if not self._timer.isActive():
-                self._timer.start()
+                w.notify("Sync Paused", "Network sync failed; changes remain saved locally and will retry on the next sync.", "warning", 4200)
         finally:
             self._running = False
-            if not self.pending and self._timer.isActive():
+            if failed and self._timer.isActive():
+                self._timer.stop()
+            elif not self.pending and self._timer.isActive():
                 self._timer.stop()

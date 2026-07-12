@@ -308,9 +308,12 @@ def modern_dashboard_qss(theme_key: str | None = None) -> str:
     }
     QPushButton#DashboardPrimaryButton { background:rgba(104,126,255,0.92); color:white; }
     QPushButton#DashboardPrimaryButton:hover { background:rgba(122,143,255,1); }
-    QPushButton#DashboardGhostButton { background:rgba(255,255,255,0.055); color:rgba(240,244,252,0.86); }
-    QPushButton#DashboardGhostButton:hover { background:rgba(255,255,255,0.10); }
-    QPushButton#DashboardDangerButton { background:rgba(231,82,96,0.10); color:#F39AA3; }
+    QPushButton#DashboardGhostButton { background:rgba(255,255,255,0.055); color:rgba(240,244,252,0.86); border:1px solid rgba(255,255,255,0.08); }
+    QPushButton#DashboardGhostButton:hover { background:rgba(255,255,255,0.14); color:#FFFFFF; border:1px solid rgba(255,255,255,0.22); }
+    QPushButton#DashboardGhostButton:pressed { background:rgba(255,255,255,0.20); }
+    QPushButton#DashboardDangerButton { background:rgba(231,82,96,0.10); color:#F39AA3; border:1px solid rgba(231,82,96,0.28); }
+    QPushButton#DashboardDangerButton:hover { background:rgba(231,82,96,0.22); color:#FFFFFF; border:1px solid rgba(255,125,138,0.72); }
+    QPushButton#DashboardDangerButton:pressed { background:rgba(231,82,96,0.32); }
     QFrame#SideBar { border:none; }
     QFrame#NavButton { border-radius:18px; background:transparent; border:none; }
     QLabel#NavTitle { font-size:16px; font-weight:800; letter-spacing:.8px; }
@@ -869,8 +872,12 @@ def modern_dashboard_qss(theme_key: str | None = None) -> str:
     QFrame#NavButton[active="true"] QLabel#NavTitle {{ color:{accent}; }}
     QFrame#SideFooter {{ background:{panel}; border:none; border-radius:16px; }}
     QPushButton#DashboardPrimaryButton {{ background:{accent}; color:#0B0D12; }}
-    QPushButton#DashboardPrimaryButton:hover {{ background:{accent}; }}
-    QPushButton#DashboardGhostButton {{ background:{glow}; color:#F1F4FA; }}
+    QPushButton#DashboardPrimaryButton:hover {{ background:{accent}; color:#FFFFFF; border:1px solid {accent_soft}; }}
+    QPushButton#DashboardPrimaryButton:pressed {{ background:{accent_soft}; }}
+    QPushButton#DashboardGhostButton {{ background:{glow}; color:#F1F4FA; border:1px solid {accent_soft}; }}
+    QPushButton#DashboardGhostButton:hover {{ background:{accent_soft}; color:#FFFFFF; border:1px solid {accent}; }}
+    QPushButton#DashboardGhostButton:pressed {{ background:{glow}; }}
+    QPushButton#DashboardDangerButton:hover {{ background:rgba(231,82,96,0.22); color:#FFFFFF; border:1px solid rgba(255,125,138,0.72); }}
     QFrame#DashboardGuildHero {{
         background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 {panel},stop:1 {secondary});
         border:none; border-radius:18px;

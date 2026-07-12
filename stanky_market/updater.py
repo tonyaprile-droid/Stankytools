@@ -24,7 +24,7 @@ from .release_config import (
     PUBLIC_RELEASES_URL,
 )
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "4.2.0"
 GITHUB_OWNER = PUBLIC_RELEASE_OWNER
 # Public, releases-only repository. Keep the source repository private.
 # Attach only compiled Windows assets here; the updater ignores GitHub source archives.

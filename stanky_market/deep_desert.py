@@ -141,12 +141,19 @@ def _looks_like_valid_image(path: Path) -> bool:
     if not path.exists() or path.stat().st_size < 25_000:
         return False
     try:
-        from PIL import Image
-        with Image.open(path) as img:
-            width, height = img.size
-            return width >= 500 and height >= 500
+        from PySide6.QtGui import QImageReader
+        reader = QImageReader(str(path))
+        size = reader.size()
+        if not size.isValid():
+            image = reader.read()
+            if image.isNull():
+                return False
+            width, height = image.width(), image.height()
+        else:
+            width, height = size.width(), size.height()
+        return width >= 500 and height >= 500
     except Exception:
-        # If Pillow is unavailable, file size is the fallback validation.
+        # File size is the fallback validation when image probing is unavailable.
         return path.stat().st_size >= 75_000
 
 

@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS companion_items (
     source_url TEXT DEFAULT '',
     subcategory TEXT DEFAULT '',
     item_id TEXT DEFAULT '',
+    power_cost REAL DEFAULT 0,
+    power_generated REAL DEFAULT 0,
+    water_gained_per_day REAL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -152,11 +155,11 @@ def _install_bundled_catalog_if_empty(conn: sqlite3.Connection) -> None:
     if not bundled.exists():
         return
     try:
-        conn.execute("ATTACH DATABASE ? AS bundled_catalog", (str(bundled),))
+        conn.execute("ATTACH DATABASE - AS bundled_catalog", (str(bundled),))
         conn.execute("""
             INSERT OR IGNORE INTO companion_items
-            (name, category, tier, rarity, stack_size, weight, template_id, volume, tags_json, source, notes, raw_json, image_path, source_url, subcategory, item_id, created_at, updated_at)
-            SELECT name, category, tier, rarity, stack_size, weight, template_id, volume, tags_json, source, notes, raw_json, image_path, source_url, subcategory, item_id, created_at, updated_at
+            (name, category, tier, rarity, stack_size, weight, template_id, volume, tags_json, source, notes, raw_json, image_path, source_url, subcategory, item_id, power_cost, power_generated, water_gained_per_day, created_at, updated_at)
+            SELECT name, category, tier, rarity, stack_size, weight, template_id, volume, tags_json, source, notes, raw_json, image_path, source_url, subcategory, item_id, COALESCE(power_cost, 0), COALESCE(power_generated, 0), COALESCE(water_gained_per_day, 0), created_at, updated_at
             FROM bundled_catalog.companion_items
         """)
         conn.execute("""
@@ -220,6 +223,9 @@ def connect() -> sqlite3.Connection:
         ("source_url", "ALTER TABLE companion_items ADD COLUMN source_url TEXT DEFAULT ''"),
         ("subcategory", "ALTER TABLE companion_items ADD COLUMN subcategory TEXT DEFAULT ''"),
         ("item_id", "ALTER TABLE companion_items ADD COLUMN item_id TEXT DEFAULT ''"),
+        ("power_cost", "ALTER TABLE companion_items ADD COLUMN power_cost REAL DEFAULT 0"),
+        ("power_generated", "ALTER TABLE companion_items ADD COLUMN power_generated REAL DEFAULT 0"),
+        ("water_gained_per_day", "ALTER TABLE companion_items ADD COLUMN water_gained_per_day REAL DEFAULT 0"),
     ):
         try:
             conn.execute(ddl)
@@ -290,7 +296,7 @@ def list_items(search: str = "", category: str = "") -> list[sqlite3.Row]:
         where = []
         params: list[str] = []
         if search.strip():
-            where.append("(name LIKE ? OR notes LIKE ? OR template_id LIKE ? OR tags_json LIKE ?)")
+            where.append("(name LIKE - OR notes LIKE - OR template_id LIKE - OR tags_json LIKE ?)")
             params.extend([f"%{search.strip()}%", f"%{search.strip()}%", f"%{search.strip()}%", f"%{search.strip()}%"] )
         if category.strip() and category != "All":
             where.append("category = ?")
@@ -316,7 +322,7 @@ def list_recipes(search: str = "") -> list[sqlite3.Row]:
         params: list[str] = []
         clause = ""
         if search.strip():
-            clause = "WHERE name LIKE ? OR output_item LIKE ? OR station LIKE ?"
+            clause = "WHERE name LIKE - OR output_item LIKE - OR station LIKE ?"
             params = [f"%{search.strip()}%"] * 3
         return conn.execute(f"SELECT * FROM companion_recipes {clause} ORDER BY name", params).fetchall()
     finally:
@@ -343,7 +349,7 @@ def craftable_recipes(search: str = "") -> list[sqlite3.Row]:
         params: list[str] = []
         clause = ""
         if search.strip():
-            clause = "WHERE name LIKE ? OR output_item LIKE ? OR station LIKE ?"
+            clause = "WHERE name LIKE - OR output_item LIKE - OR station LIKE ?"
             params = [f"%{search.strip()}%"] * 3
         return conn.execute(
             f"SELECT * FROM companion_recipes {clause} ORDER BY output_item, station, name",
@@ -458,7 +464,7 @@ def list_blueprints(search: str = "") -> list[sqlite3.Row]:
         params: list[str] = []
         clause = ""
         if search.strip():
-            clause = "WHERE name LIKE ? OR base_type LIKE ? OR tags LIKE ? OR material_notes LIKE ?"
+            clause = "WHERE name LIKE - OR base_type LIKE - OR tags LIKE - OR material_notes LIKE ?"
             params = [f"%{search.strip()}%"] * 4
         return conn.execute(f"SELECT * FROM companion_blueprints {clause} ORDER BY updated_at DESC, name", params).fetchall()
     finally:
@@ -1215,7 +1221,7 @@ def recipes_for_item(item_name: str) -> list[sqlite3.Row]:
     conn = connect()
     try:
         return conn.execute(
-            "SELECT * FROM companion_recipes WHERE output_item = ? OR name = ? ORDER BY name",
+            "SELECT * FROM companion_recipes WHERE output_item = - OR name = - ORDER BY name",
             (item_name, item_name),
         ).fetchall()
     finally:
@@ -1547,6 +1553,9 @@ def _ensure_export_columns(conn: sqlite3.Connection) -> None:
         "ALTER TABLE companion_items ADD COLUMN source_url TEXT DEFAULT ''",
         "ALTER TABLE companion_items ADD COLUMN subcategory TEXT DEFAULT ''",
         "ALTER TABLE companion_items ADD COLUMN item_id TEXT DEFAULT ''",
+        "ALTER TABLE companion_items ADD COLUMN power_cost REAL DEFAULT 0",
+        "ALTER TABLE companion_items ADD COLUMN power_generated REAL DEFAULT 0",
+        "ALTER TABLE companion_items ADD COLUMN water_gained_per_day REAL DEFAULT 0",
     ):
         try:
             conn.execute(ddl)
@@ -1779,7 +1788,7 @@ def import_catalog_from_exports(progress=None, reset: bool = False) -> dict[str,
                 )
                 imported_items += 1
                 for rec_index, recipe in enumerate(_recipe_rows_from_export_item(item), 1):
-                    recipe_name = f"{name} — {recipe['station']}"
+                    recipe_name = f"{name} - {recipe['station']}"
                     conn.execute(
                         """
                         INSERT INTO companion_recipes (name, output_item, output_qty, station, notes)
@@ -1835,6 +1844,24 @@ def clear_imported_catalog_items(include_recipes: bool = True) -> dict[str, int]
         conn.close()
 
 
+def build_calculator_items() -> list[sqlite3.Row]:
+    conn = connect()
+    _ensure_export_columns(conn)
+    try:
+        return conn.execute(
+            "SELECT id, name, category, subcategory, image_path, "
+            "COALESCE(power_cost, 0) AS power_cost, "
+            "COALESCE(power_generated, 0) AS power_generated, "
+            "COALESCE(water_gained_per_day, 0) AS water_gained_per_day "
+            "FROM companion_items "
+            "WHERE LOWER(COALESCE(category, '')) = 'placeable' "
+            "AND (COALESCE(power_cost, 0) != 0 OR COALESCE(power_generated, 0) != 0 OR COALESCE(water_gained_per_day, 0) != 0) "
+            "ORDER BY name"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
 def list_items(search: str = "", category: str = "") -> list[sqlite3.Row]:
     conn = connect()
     _ensure_export_columns(conn)
@@ -1842,7 +1869,7 @@ def list_items(search: str = "", category: str = "") -> list[sqlite3.Row]:
         where = []
         params: list[str] = []
         if search.strip():
-            where.append("(name LIKE ? OR notes LIKE ? OR template_id LIKE ? OR item_id LIKE ? OR tags_json LIKE ? OR subcategory LIKE ?)")
+            where.append("(name LIKE - OR notes LIKE - OR template_id LIKE - OR item_id LIKE - OR tags_json LIKE - OR subcategory LIKE ?)")
             params.extend([f"%{search.strip()}%"] * 6)
         if category.strip() and category != "All":
             where.append("category = ?")
@@ -1915,6 +1942,8 @@ def _infer_export_category(item: dict, fields: dict) -> tuple[str, str]:
 
 # Final override after category inference helpers are defined.
 def import_catalog_from_exports(progress=None, reset: bool = False) -> dict[str, int]:
+    if reset and bundled_catalog_db_path().exists():
+        return reload_bundled_catalog(progress=progress)
     root = _exports_root()
     catalog_file = root / "dune_catalog.json"
     if not catalog_file.exists():
@@ -1984,7 +2013,7 @@ def import_catalog_from_exports(progress=None, reset: bool = False) -> dict[str,
                 )
                 imported_items += 1
                 for recipe in _recipe_rows_from_export_item(item):
-                    recipe_name = f"{name} — {recipe['station']}"
+                    recipe_name = f"{name} - {recipe['station']}"
                     conn.execute(
                         """
                         INSERT INTO companion_recipes (name, output_item, output_qty, station, notes)

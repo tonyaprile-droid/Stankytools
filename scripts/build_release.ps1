@@ -72,6 +72,7 @@ elseif (Test-Path $MainFile) {
     python -m PyInstaller `
         --clean `
         --noconfirm `
+        --onedir `
         --windowed `
         --name "StankyTools" `
         --distpath $DistDir `
@@ -96,7 +97,10 @@ if (-not $AppExe) {
 $AppDir = Split-Path -Parent $AppExe.FullName
 $ExeRelativePath = Get-StankyRelativePath -BasePath $DistDir -TargetPath $AppExe.FullName
 $InternalDir = Join-Path $AppDir "_internal"
-$PythonDll = Join-Path $InternalDir "python312.dll"
+$PythonDllItem = Get-ChildItem -LiteralPath $InternalDir -Filter "python*.dll" -File | Where-Object {
+    $_.Name -match '^python\d+\.dll$'
+} | Select-Object -First 1
+$PythonDll = if ($PythonDllItem) { $PythonDllItem.FullName } else { Join-Path $InternalDir "python*.dll" }
 $PySideDir = Join-Path $InternalDir "PySide6"
 $AssetsDir = Join-Path $InternalDir "assets"
 $CatalogDb = Join-Path $AssetsDir "catalog\catalog.sqlite3"
@@ -104,7 +108,7 @@ $CatalogDb = Join-Path $AssetsDir "catalog\catalog.sqlite3"
 $RequiredPaths = @(
     @{ Label = "StankyTools.exe"; Path = $AppExe.FullName },
     @{ Label = "_internal"; Path = $InternalDir },
-    @{ Label = "python312.dll"; Path = $PythonDll },
+    @{ Label = "Python runtime DLL"; Path = $PythonDll },
     @{ Label = "PySide6"; Path = $PySideDir },
     @{ Label = "assets"; Path = $AssetsDir },
     @{ Label = "catalog database"; Path = $CatalogDb }
@@ -117,6 +121,75 @@ foreach ($Required in $RequiredPaths) {
         throw "Required release runtime item missing: $($Required.Label) at $($Required.Path)"
     }
 }
+
+function Optimize-PySidePlugins {
+    param([Parameter(Mandatory = $true)][string]$PySideRoot)
+
+    if (-not (Test-Path -LiteralPath $PySideRoot)) {
+        return
+    }
+
+    $PluginRoot = Join-Path $PySideRoot "Qt6\plugins"
+    if (-not (Test-Path -LiteralPath $PluginRoot)) {
+        $PluginRoot = Join-Path $PySideRoot "plugins"
+    }
+    if (-not (Test-Path -LiteralPath $PluginRoot)) {
+        return
+    }
+
+    $KeepPluginDirs = @("platforms", "imageformats", "styles")
+    Get-ChildItem -LiteralPath $PluginRoot -Directory | Where-Object {
+        $KeepPluginDirs -notcontains $_.Name
+    } | ForEach-Object {
+        Write-Host "Removing unused Qt plugin folder: $($_.FullName)"
+        Remove-Item -LiteralPath $_.FullName -Recurse -Force
+    }
+
+    $Platforms = Join-Path $PluginRoot "platforms"
+    if (Test-Path -LiteralPath $Platforms) {
+        Get-ChildItem -LiteralPath $Platforms -File | Where-Object {
+            $_.Name -ne "qwindows.dll"
+        } | ForEach-Object {
+            Write-Host "Removing unused Qt platform plugin: $($_.Name)"
+            Remove-Item -LiteralPath $_.FullName -Force
+        }
+    }
+
+    $ImageFormats = Join-Path $PluginRoot "imageformats"
+    if (Test-Path -LiteralPath $ImageFormats) {
+        $KeepImageFormats = @("qgif.dll", "qico.dll", "qjpeg.dll", "qsvg.dll", "qwebp.dll")
+        Get-ChildItem -LiteralPath $ImageFormats -File | Where-Object {
+            $KeepImageFormats -notcontains $_.Name
+        } | ForEach-Object {
+            Write-Host "Removing unused Qt image plugin: $($_.Name)"
+            Remove-Item -LiteralPath $_.FullName -Force
+        }
+    }
+
+    $RemoveQtBinaries = @(
+        "Qt6Pdf.dll", "Qt6PdfWidgets.dll", "QtPdf.pyd", "QtPdfWidgets.pyd",
+        "Qt6Quick.dll", "Qt6QuickControls2.dll", "Qt6QuickTemplates2.dll", "QtQuick.pyd", "QtQuickControls2.pyd", "QtQuickWidgets.pyd",
+        "Qt6Qml.dll", "Qt6QmlMeta.dll", "Qt6QmlModels.dll", "Qt6QmlWorkerScript.dll", "QtQml.pyd",
+        "Qt6WebEngineCore.dll", "Qt6WebEngineQuick.dll", "QtWebEngineCore.pyd", "QtWebEngineWidgets.pyd",
+        "Qt6Multimedia.dll", "Qt6MultimediaWidgets.dll", "QtMultimedia.pyd", "QtMultimediaWidgets.pyd", "opengl32sw.dll"
+    )
+    Get-ChildItem -LiteralPath $PySideRoot -Recurse -File | Where-Object {
+        $RemoveQtBinaries -contains $_.Name
+    } | ForEach-Object {
+        Write-Host "Removing unused Qt binary: $($_.Name)"
+        Remove-Item -LiteralPath $_.FullName -Force
+    }
+
+    foreach ($OptionalDirName in @("qml", "translations")) {
+        $OptionalDir = Join-Path $PySideRoot $OptionalDirName
+        if (Test-Path -LiteralPath $OptionalDir) {
+            Write-Host "Removing unused PySide6 folder: $OptionalDir"
+            Remove-Item -LiteralPath $OptionalDir -Recurse -Force
+        }
+    }
+}
+
+Optimize-PySidePlugins -PySideRoot $PySideDir
 
 Write-Host "Application executable: $($AppExe.FullName)"
 Write-Host "Relative executable path: $ExeRelativePath"

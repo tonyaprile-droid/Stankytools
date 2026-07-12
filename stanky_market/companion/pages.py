@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import store
+from .. import db
+from ..ui.tactical_theme import theme_colors
 
 
 def _card(title: str, body: str = "", min_h: int = 110) -> QFrame:
@@ -102,24 +104,30 @@ class CompanionImportWorker(QThread):
 
 
 def build_catalog_page(window) -> QWidget:
-    page, layout = window._page_shell("Catalog", "Full Dune item catalog, item details, and crafting calculator.")
-    page.setStyleSheet(page.styleSheet() + """
-        QFrame#CatalogCompactRow {
-            background: rgba(21, 18, 13, 0.72);
-            border: 1px solid rgba(214, 174, 90, 0.16);
-            border-radius: 8px;
-        }
-        QFrame#CatalogCompactRow:hover {
-            background: rgba(214, 174, 90, 0.10);
-            border: 1px solid rgba(214, 174, 90, 0.42);
-        }
-        QLabel#CatalogCompactName {
-            font-size: 14px;
-            font-weight: 800;
-            color: #F1E3C2;
-            letter-spacing: 0.2px;
-        }
-    """)
+    page, layout = window._page_shell("Catalog", "")
+
+    def apply_catalog_theme() -> None:
+        c = theme_colors(db.get_setting("color_theme", "dune") or "dune")
+        page.setStyleSheet(f"""
+            QFrame#CatalogCompactRow {{
+                background: {c['panel']};
+                border: 1px solid {c['border']};
+                border-radius: 8px;
+            }}
+            QFrame#CatalogCompactRow:hover {{
+                background: {c['panel_hover']};
+                border: 1px solid {c['accent_soft']};
+            }}
+            QLabel#CatalogCompactName {{
+                font-size: 14px;
+                font-weight: 800;
+                color: {c['text']};
+                letter-spacing: 0px;
+            }}
+        """)
+
+    page.refresh_theme_assets = apply_catalog_theme
+    apply_catalog_theme()
 
     tabs = QTabWidget()
     tabs.setObjectName("CommandTabs")
@@ -155,11 +163,14 @@ def build_catalog_page(window) -> QWidget:
     search = QLineEdit()
     search.setPlaceholderText("Search items, categories, materials, weapons, vehicles, buildings...")
     category = QComboBox()
+    category.setMinimumWidth(340)
+    category.setMinimumHeight(46)
+    category.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
     load_exports_btn = QPushButton("Reload Bundled Catalog")
     delete_imported_btn = QPushButton("Delete Imported Items")
     delete_imported_btn.setObjectName("DangerButton")
     controls.addWidget(search, 3)
-    controls.addWidget(category, 1)
+    controls.addWidget(category, 2)
     controls.addWidget(load_exports_btn)
     controls.addWidget(delete_imported_btn)
     catalog_layout.addLayout(controls)
@@ -208,7 +219,7 @@ def build_catalog_page(window) -> QWidget:
     detail_image.setFixedSize(96, 96)
     detail_image.setAlignment(Qt.AlignCenter)
     detail_image.setObjectName("CatalogIcon")
-    detail_image.setText("◈")
+    detail_image.setText("*")
     detail_requirements = QTextEdit()
     detail_requirements.setReadOnly(True)
     detail_requirements.setObjectName("TextPreview")
@@ -230,13 +241,14 @@ def build_catalog_page(window) -> QWidget:
             value.setText(f"{int(stats.get(key, 0)):,}")
 
     def refresh_categories():
-        current = category.currentText() or "All"
+        current = (category.currentText() or "").strip()
+        target = current or "Placeable"
         category.blockSignals(True)
         category.clear()
         category.addItem("All")
         for cat in store.item_categories():
             category.addItem(cat)
-        idx = category.findText(current)
+        idx = category.findText(target)
         category.setCurrentIndex(idx if idx >= 0 else 0)
         category.blockSignals(False)
 
@@ -252,7 +264,7 @@ def build_catalog_page(window) -> QWidget:
             if materials:
                 lines.append("Requires:")
                 for mat, amount in materials:
-                    lines.append(f"  • {mat}: {amount:g}")
+                    lines.append(f"  - {mat}: {amount:g}")
             lines.append("")
         return lines
 
@@ -262,13 +274,13 @@ def build_catalog_page(window) -> QWidget:
         if "subcategory" in row.keys() and row["subcategory"]:
             meta_parts.append(row["subcategory"])
         detail_meta.setText(
-            " • ".join(meta_parts)
+            " - ".join(meta_parts)
             + f"\nTier: {row['tier'] or '-'}    Rarity: {row['rarity'] or '-'}\nStack: {row['stack_size'] or '-'}    Volume: {row['volume'] or '-'}"
         )
 
         image_path = row["image_path"] if "image_path" in row.keys() else ""
         detail_image.clear()
-        detail_image.setText("◈")
+        detail_image.setText("*")
         if image_path:
             resolved = store.resolve_catalog_asset_path(image_path)
             pix = QPixmap(resolved)
@@ -405,7 +417,7 @@ def build_catalog_page(window) -> QWidget:
             load_exports_btn.setEnabled(True)
             delete_imported_btn.setEnabled(True)
             import_status.setText(f"Loaded {stats.get('items', 0):,} items and {stats.get('recipes', 0):,} recipes.")
-            window.notify("Catalog Loaded", f"{stats.get('items', 0):,} items • {stats.get('recipes', 0):,} recipes", "success")
+            window.notify("Catalog Loaded", f"{stats.get('items', 0):,} items - {stats.get('recipes', 0):,} recipes", "success")
             refresh_categories()
             refresh()
             craft_tab = tabs.widget(1)
@@ -453,282 +465,458 @@ def build_catalog_page(window) -> QWidget:
 
     craft_tab = _strip_embedded_banner(build_crafting_page(window))
     tabs.addTab(catalog_tab, "Catalog")
-    tabs.addTab(craft_tab, "Craft")
+    tabs.addTab(craft_tab, "Build Calculator")
     page.refresh_companion_catalog = refresh
     return page
 
 def build_crafting_page(window) -> QWidget:
-    page, layout = window._page_shell("Craft", "Crafting calculator, saved projects, and Discord material requests.")
+    page, layout = window._page_shell(
+        "Build Calculator",
+        "Add placeable items and quantities to calculate your base power and water balance.",
+    )
+    layout.setContentsMargins(14, 14, 14, 14)
+    layout.setSpacing(12)
+    page.setObjectName("BuildCalculatorPage")
+    page.setObjectName("BuildCalculatorPage")
 
-    header = QLabel("Add crafted items, set quantities, and StankyTools will total the required materials. Import recipes one item at a time from a recipe page when data is missing.")
-    header.setObjectName("MutedText")
-    header.setWordWrap(True)
-    layout.addWidget(header)
+    def apply_build_theme() -> None:
+        c = theme_colors(db.get_setting("color_theme", "dune") or "dune")
+        page.setStyleSheet(f"""
+            QWidget#BuildCalculatorPage {{ background: {c['bg']}; color: {c['text']}; }}
+            QFrame#BuildOuterCard, QFrame#BuildPanel, QFrame#BuildSummaryPanel, QFrame#BuildBreakdownPanel, QFrame#BuildTipBar {{
+                background: {c['panel']}; border: none; border-radius: 8px;
+            }}
+            QFrame#BuildItemsHeader {{ background: {c['secondary']}; border: none; border-radius: 0; }}
+            QFrame#BuildItemRow {{ background: transparent; border: none; border-radius: 0; }}
+            QLabel#BuildSubtitle, QLabel#BuildMuted, QLabel#BuildUnit {{ color: {c['muted']}; font-size: 13px; }}
+            QLabel#BuildSectionTitle {{ color: {c['accent']}; font-size: 16px; font-weight: 900; }}
+            QLabel#BuildColumnTitle {{ color: {c['muted']}; font-size: 12px; font-weight: 800; }}
+            QLabel#BuildStatusMessage {{ color: {c['text']}; font-size: 16px; font-weight: 800; }}
+            QLabel#BuildStatusValue {{ color: {c['text']}; font-size: 15px; font-weight: 900; }}
+            QLabel#BuildGroupHeader {{ color: {c['accent']}; font-size: 13px; font-weight: 950; padding: 12px 10px 5px 10px; }}
+            QLabel#BuildBadge {{ background: {c['accent_faint']}; color: {c['text']}; border: none; border-radius: 6px; padding: 3px 8px; font-size: 12px; font-weight: 800; }}
+            QLabel#BuildItemName {{ color: {c['text']}; font-size: 14px; font-weight: 800; }}
+            QLabel#BuildItemType {{ color: {c['accent']}; font-size: 12px; }}
+            QLabel#BuildItemImage, QLabel#BuildBreakdownImage {{ background: rgba(0,0,0,0.24); border: none; border-radius: 5px; color: {c['muted']}; }}
+            QPushButton#BuildQtyButton {{ background: {c['secondary']}; border: none; border-radius: 5px; color: {c['text']}; font-size: 18px; font-weight: 700; }}
+            QPushButton#BuildQtyButton:hover {{ background: {c['hover']}; border: none; }}
+            QLabel#BuildQtyValue {{ background: rgba(0,0,0,0.30); color: {c['text']}; font-size: 15px; font-weight: 900; qproperty-alignment: AlignCenter; }}
+            QPushButton#BuildClearButton {{ background: {c['danger_soft']}; border: none; border-radius: 6px; color: {c['danger']}; font-size: 12px; font-weight: 800; padding: 10px 14px; }}
+            QLabel#BuildStatIcon {{ font-size: 26px; font-weight: 900; }}
+            QLabel#BuildStatValue {{ color: {c['text']}; font-size: 28px; font-weight: 900; }}
+            QLabel#BuildStatusBadge {{ background: {c['success_soft']}; border-radius: 5px; color: {c['success']}; font-size: 11px; font-weight: 900; padding: 5px 8px; }}
+            QFrame#BuildStatusBanner {{ background: {c['accent_faint']}; border: none; border-radius: 6px; }}
+            QLabel#BuildBreakHead {{ color: {c['muted']}; font-size: 11px; font-weight: 900; }}
+            QLabel#BuildTableCell {{ color: {c['text']}; font-size: 12px; }}
+            QLabel#BuildTotalLabel {{ color: {c['accent']}; font-size: 18px; font-weight: 900; }}
+            QScrollArea {{ background: transparent; border: 0; }}
+            QScrollBar:vertical {{ background: rgba(0,0,0,0.20); width: 8px; margin: 0; }}
+            QScrollBar::handle:vertical {{ background: {c['accent_soft']}; border-radius: 4px; min-height: 42px; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+        """)
 
-    target_row = QHBoxLayout()
-    search = QLineEdit()
-    search.setPlaceholderText("Type an item name to search recipes...")
-    qty = QSpinBox()
-    qty.setRange(1, 999999)
-    qty.setValue(1)
-    add_btn = QPushButton("Add to Calculator")
-    target_row.addWidget(search, 1)
-    target_row.addWidget(QLabel("Qty"))
-    target_row.addWidget(qty)
-    target_row.addWidget(add_btn)
-    layout.addLayout(target_row)
+    page.refresh_theme_assets = apply_build_theme
+    apply_build_theme()
 
-    search_results = QListWidget()
-    search_results.setObjectName("CatalogResultsList")
-    search_results.setMinimumHeight(120)
-    search_results.setMaximumHeight(190)
-    search_results.setAlternatingRowColors(True)
-    layout.addWidget(search_results)
+    rows = list(store.build_calculator_items())
+    quantities: dict[int, int] = {int(row["id"]): 0 for row in rows}
+    qty_labels: dict[int, QLabel] = {}
+    green, red, purple, blue = "#45F36B", "#FF3E48", "#C15CFF", "#4FA4FF"
 
-    button_row = QHBoxLayout()
-    copy_btn = QPushButton("Copy Discord Request")
-    material_btn = QPushButton("View Material List")
-    save_set_btn = QPushButton("Save Set")
-    load_set_btn = QPushButton("Load Set")
-    clear_btn = QPushButton("Clear")
-    import_url_btn = QPushButton("Import Recipe URL")
-    button_row.addWidget(copy_btn)
-    button_row.addWidget(material_btn)
-    button_row.addWidget(save_set_btn)
-    button_row.addWidget(load_set_btn)
-    button_row.addWidget(clear_btn)
-    button_row.addStretch(1)
-    button_row.addWidget(import_url_btn)
-    layout.addLayout(button_row)
+    def number_text(value: float, plus: bool = False, dash_zero: bool = False, negative: bool = False) -> str:
+        value = float(value or 0)
+        if dash_zero and abs(value) < 0.000001:
+            return "-"
+        sign = "-" if value < 0 else ""
+        if negative and value > 0:
+            sign = "-"
+        elif plus and value > 0:
+            sign = "+"
+        amount = abs(value)
+        body = f"{int(round(amount)):,}" if abs(amount - round(amount)) < 0.000001 else f"{amount:,.2f}".rstrip("0").rstrip(".")
+        return f"{sign}{body}"
 
-    import_status = QLabel("Ready — recipe imports are now on-demand so the app stays fast.")
-    import_status.setObjectName("MutedText")
-    import_progress = QProgressBar()
-    import_progress.setRange(0, 0)
-    import_progress.setVisible(False)
-    layout.addWidget(import_status)
-    layout.addWidget(import_progress)
-
-    summary = QLabel("No crafting targets added yet.")
-    summary.setObjectName("MutedText")
-    summary.setWordWrap(True)
-    layout.addWidget(summary)
-
-    content = QHBoxLayout()
-    content.setSpacing(12)
-    layout.addLayout(content, 1)
-
-    left_scroll = QScrollArea()
-    left_scroll.setWidgetResizable(True)
-    left_scroll.setFrameShape(QFrame.NoFrame)
-    left_inner = QWidget()
-    target_layout = QVBoxLayout(left_inner)
-    target_layout.setContentsMargins(0, 0, 0, 0)
-    target_layout.setSpacing(10)
-    left_scroll.setWidget(left_inner)
-    content.addWidget(left_scroll, 1)
-
-    right_scroll = QScrollArea()
-    right_scroll.setWidgetResizable(True)
-    right_scroll.setFrameShape(QFrame.NoFrame)
-    right_inner = QWidget()
-    material_layout = QVBoxLayout(right_inner)
-    material_layout.setContentsMargins(0, 0, 0, 0)
-    material_layout.setSpacing(10)
-    right_scroll.setWidget(right_inner)
-    content.addWidget(right_scroll, 1)
-
-    recipes: list = []
-    targets: list[dict] = []
-
-    def reload_recipe_choices():
-        nonlocal recipes
-        query = search.text().strip()
-        recipes = store.craftable_recipes(query) if query else []
-        search_results.clear()
-        if not query:
-            search_results.addItem("Start typing to search craftable items...")
-            return
-        if not recipes:
-            search_results.addItem("No matching recipes found. Import a recipe URL if the item is missing.")
-            return
-        for recipe in recipes[:75]:
-            station = recipe["station"] or "Unknown"
-            out_qty = int(recipe["output_qty"] or 1)
-            item = QListWidgetItem(f"{recipe['output_item']} x{out_qty}  •  {station}")
-            item.setData(Qt.UserRole, int(recipe["id"]))
-            search_results.addItem(item)
-        if search_results.count():
-            search_results.setCurrentRow(0)
-
-    def clear_layout(box):
-        while box.count():
-            item = box.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-
-    def current_recipe_label(recipe_id: int) -> str:
-        for recipe in store.craftable_recipes(""):
-            if int(recipe["id"]) == int(recipe_id):
-                return f"{recipe['output_item']}  •  {recipe['station'] or 'Unknown'}"
-        return f"Recipe #{recipe_id}"
-
-    def remove_target(index: int):
-        if 0 <= index < len(targets):
-            targets.pop(index)
-            refresh_calculator()
-
-    def change_target_qty(index: int, value: int):
-        if 0 <= index < len(targets):
-            targets[index]["qty"] = max(1, int(value))
-            refresh_calculator()
-
-    def refresh_calculator():
-        clear_layout(target_layout)
-        clear_layout(material_layout)
-        outputs, materials = store.aggregate_recipe_materials(targets)
-        if not outputs:
-            summary.setText("No crafting targets added yet. Search for a craftable item, choose quantity, then click Add to Calculator.")
-            target_layout.addWidget(_card("No crafting targets", "Add an item above to begin calculating."))
-            material_layout.addWidget(_card("No materials yet", "Materials appear here once you add craftable items."))
-            target_layout.addStretch(1)
-            material_layout.addStretch(1)
-            return
-        summary.setText(f"{len(outputs)} crafting target(s) • {len(materials)} material type(s)")
-        for index, output in enumerate(outputs):
-            card = QFrame()
-            card.setObjectName("CommandCard")
-            card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(14, 12, 14, 12)
-            title = QLabel(output["output_item"].upper())
-            title.setObjectName("CardTitle")
-            body = QLabel(f"Station: {output['station']}\nRecipe: {output['name']}")
-            body.setObjectName("CardHint")
-            body.setWordWrap(True)
-            row = QHBoxLayout()
-            row.addWidget(QLabel("Qty"))
-            spin = QSpinBox()
-            spin.setRange(1, 999999)
-            spin.setValue(int(output["qty"]))
-            spin.valueChanged.connect(lambda value, i=index: change_target_qty(i, value))
-            remove_btn = QPushButton("Remove")
-            remove_btn.clicked.connect(lambda checked=False, i=index: remove_target(i))
-            row.addWidget(spin)
-            row.addWidget(remove_btn)
-            row.addStretch(1)
-            card_layout.addWidget(title)
-            card_layout.addWidget(body)
-            card_layout.addLayout(row)
-            target_layout.addWidget(card)
-        for material, amount in materials:
-            material_layout.addWidget(_card(material, f"Total needed: {amount:g}"))
-        target_layout.addStretch(1)
-        material_layout.addStretch(1)
-
-    def add_selected_recipe():
-        item = search_results.currentItem()
-        recipe_id = item.data(Qt.UserRole) if item is not None else None
-        if recipe_id is None:
-            QMessageBox.information(page, "No Recipe", "Search for an item and select a matching recipe first. Import a recipe URL if the item is missing.")
-            return
-        targets.append({"recipe_id": int(recipe_id), "qty": int(qty.value())})
-        refresh_calculator()
-
-    def discord_text() -> str:
-        outputs, materials = store.aggregate_recipe_materials(targets)
-        if not outputs:
-            return ""
-        lines = ["**StankyTools Crafting Request**", "", "Crafting Targets:"]
-        for output in outputs:
-            lines.append(f"- {output['output_item']} x{output['qty']} ({output['station']})")
-        lines += ["", "Materials Needed:"]
-        lines += [f"- {name}: {amount:g}" for name, amount in materials]
-        return "\n".join(lines)
-
-    def copy_discord():
-        text = discord_text()
-        if not text:
-            QMessageBox.information(page, "Nothing to Copy", "Add at least one crafting target first.")
-            return
-        page.window().clipboard().setText(text)
-        window.notify("Copied", "Crafting request copied for Discord.", "success")
-
-    def show_material_list():
-        QMessageBox.information(page, "Material List", discord_text() or "Add at least one crafting target first.")
-
-    def save_set():
-        if not targets:
-            QMessageBox.information(page, "Save Set", "Add at least one crafting target first.")
-            return
-        name, ok = QInputDialog.getText(page, "Save Crafting Set", "Set name:")
-        if not ok or not name.strip():
-            return
+    def row_float(row, key: str) -> float:
         try:
-            store.save_crafting_set(name.strip(), targets)
-            window.notify("Crafting Set Saved", name.strip(), "success")
-        except Exception as exc:
-            QMessageBox.warning(page, "Save Failed", str(exc))
+            return float(row[key] or 0)
+        except Exception:
+            return 0.0
 
-    def load_set():
-        sets = store.list_crafting_sets()
-        if not sets:
-            QMessageBox.information(page, "Load Set", "No saved crafting sets yet.")
+    def set_label_color(label: QLabel, color: str) -> None:
+        label.setStyleSheet(f"color: {color};")
+
+    def make_image_label(image_path: str, size: int = 42) -> QLabel:
+        label = QLabel("*")
+        label.setObjectName("BuildItemImage" if size > 30 else "BuildBreakdownImage")
+        label.setFixedSize(size, size)
+        label.setAlignment(Qt.AlignCenter)
+        if image_path:
+            pix = QPixmap(store.resolve_catalog_asset_path(image_path))
+            if not pix.isNull():
+                label.setText("")
+                label.setPixmap(pix.scaled(size - 8, size - 8, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        return label
+
+    outer = QFrame()
+    outer.setObjectName("BuildOuterCard")
+    outer_layout = QVBoxLayout(outer)
+    outer_layout.setContentsMargins(14, 14, 14, 8)
+    outer_layout.setSpacing(14)
+    layout.addWidget(outer, 1)
+
+    main_row = QHBoxLayout()
+    main_row.setSpacing(18)
+    outer_layout.addLayout(main_row, 1)
+
+    left_panel = QFrame()
+    left_panel.setObjectName("BuildPanel")
+    left_panel.setMinimumWidth(430)
+    left_layout = QVBoxLayout(left_panel)
+    left_layout.setContentsMargins(0, 0, 0, 12)
+    left_layout.setSpacing(0)
+    main_row.addWidget(left_panel, 5)
+
+    items_header = QFrame()
+    items_header.setObjectName("BuildItemsHeader")
+    items_header_layout = QHBoxLayout(items_header)
+    items_header_layout.setContentsMargins(18, 13, 18, 13)
+    items_header_layout.setSpacing(10)
+    left_title = QLabel("PLACEABLE ITEMS")
+    left_title.setObjectName("BuildSectionTitle")
+    count_badge = QLabel(f"{len(rows):,}")
+    count_badge.setObjectName("BuildBadge")
+    qty_head = QLabel("QUANTITY")
+    qty_head.setObjectName("BuildColumnTitle")
+    items_header_layout.addWidget(left_title)
+    items_header_layout.addWidget(count_badge)
+    items_header_layout.addStretch(1)
+    items_header_layout.addWidget(qty_head)
+    left_layout.addWidget(items_header)
+
+    item_scroll = QScrollArea()
+    item_scroll.setWidgetResizable(True)
+    item_scroll.setFrameShape(QFrame.NoFrame)
+    item_scroll.setMinimumHeight(360)
+    item_inner = QWidget()
+    item_list = QVBoxLayout(item_inner)
+    item_list.setContentsMargins(14, 0, 14, 8)
+    item_list.setSpacing(0)
+    item_scroll.setWidget(item_inner)
+    left_layout.addWidget(item_scroll, 1)
+
+    clear_btn = QPushButton("Clear All Items")
+    clear_btn.setObjectName("BuildClearButton")
+    clear_btn.setMinimumHeight(42)
+    clear_wrap = QVBoxLayout()
+    clear_wrap.setContentsMargins(14, 12, 14, 8)
+    clear_wrap.addWidget(clear_btn)
+    left_layout.addLayout(clear_wrap)
+
+    right_col = QVBoxLayout()
+    right_col.setSpacing(6)
+    main_row.addLayout(right_col, 7)
+
+    summary_heading = QHBoxLayout()
+    summary_icon = QLabel("")
+    summary_icon.setObjectName("BuildSectionTitle")
+    summary_label = QLabel("BASE SUMMARY")
+    summary_label.setObjectName("BuildSectionTitle")
+    summary_heading.addWidget(summary_icon)
+    summary_heading.addWidget(summary_label)
+    summary_heading.addStretch(1)
+    right_col.addLayout(summary_heading)
+
+    summary_panel = QFrame()
+    summary_panel.setObjectName("BuildSummaryPanel")
+    summary_grid = QGridLayout(summary_panel)
+    summary_grid.setContentsMargins(18, 18, 18, 18)
+    summary_grid.setHorizontalSpacing(0)
+    summary_grid.setVerticalSpacing(12)
+    right_col.addWidget(summary_panel)
+
+    stat_defs = [("generated", "P+", "POWER GENERATED", green, "Power"), ("used", "P-", "POWER USED", red, "Power"), ("net", "NET", "NET POWER", purple, "Power"), ("water", "H2O", "WATER GENERATED", blue, "/ day")]
+    stat_values: dict[str, QLabel] = {}
+    net_badge = QLabel("SURPLUS")
+    net_badge.setObjectName("BuildStatusBadge")
+    for col, (key, icon_text, label_text, color, unit_text) in enumerate(stat_defs):
+        stat_box = QVBoxLayout()
+        stat_box.setSpacing(8)
+        icon = QLabel(icon_text)
+        icon.setObjectName("BuildStatIcon")
+        icon.setAlignment(Qt.AlignCenter)
+        set_label_color(icon, color)
+        label = QLabel(label_text)
+        label.setObjectName("BuildColumnTitle")
+        label.setAlignment(Qt.AlignCenter)
+        value = QLabel("0")
+        value.setObjectName("BuildStatValue")
+        value.setAlignment(Qt.AlignCenter)
+        unit = QLabel(unit_text)
+        unit.setObjectName("BuildUnit")
+        unit.setAlignment(Qt.AlignCenter)
+        stat_box.addWidget(icon)
+        stat_box.addWidget(label)
+        stat_box.addWidget(value)
+        stat_box.addWidget(unit)
+        stat_box.addWidget(net_badge, 0, Qt.AlignCenter) if key == "net" else stat_box.addSpacing(25)
+        summary_grid.addLayout(stat_box, 0, col)
+        summary_grid.setColumnStretch(col, 1)
+        stat_values[key] = value
+
+    status_banner = QFrame()
+    status_banner.setObjectName("BuildStatusBanner")
+    status_layout = QHBoxLayout(status_banner)
+    status_layout.setContentsMargins(16, 12, 16, 12)
+    status_layout.setSpacing(10)
+    status_icon = QLabel("i")
+    status_icon.setObjectName("BuildSectionTitle")
+    status_message = QLabel("")
+    status_message.setObjectName("BuildStatusMessage")
+    status_message.setWordWrap(True)
+    status_value = QLabel("")
+    status_value.setObjectName("BuildStatusValue")
+    status_layout.addWidget(status_icon)
+    status_layout.addWidget(status_message, 1)
+    status_layout.addWidget(status_value)
+    right_col.addWidget(status_banner)
+
+    breakdown_panel = QFrame()
+    breakdown_panel.setObjectName("BuildBreakdownPanel")
+    breakdown_layout = QVBoxLayout(breakdown_panel)
+    breakdown_layout.setContentsMargins(16, 14, 16, 14)
+    breakdown_layout.setSpacing(10)
+    breakdown_title = QLabel("ITEM BREAKDOWN")
+    breakdown_title.setObjectName("BuildSectionTitle")
+    breakdown_layout.addWidget(breakdown_title)
+    breakdown_grid = QGridLayout()
+    breakdown_grid.setHorizontalSpacing(10)
+    breakdown_grid.setVerticalSpacing(0)
+    breakdown_layout.addLayout(breakdown_grid, 1)
+    right_col.addWidget(breakdown_panel, 1)
+
+    def clear_grid(grid: QGridLayout) -> None:
+        while grid.count():
+            item = grid.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget:
+                widget.deleteLater()
+            elif child_layout:
+                clear_grid(child_layout)
+
+    def totals() -> tuple[float, float, float, float]:
+        generated = used = water = 0.0
+        for row in rows:
+            qty = quantities.get(int(row["id"]), 0)
+            generated += qty * row_float(row, "power_generated")
+            used += qty * row_float(row, "power_cost")
+            water += qty * row_float(row, "water_gained_per_day")
+        return generated, used, generated - used, water
+
+    def add_breakdown_text(text: str, row: int, col: int, color: str = "#F7F2FF", bold: bool = False, align=Qt.AlignCenter) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("BuildTableCell")
+        label.setAlignment(align)
+        label.setStyleSheet(f"color: {color}; {'font-weight: 900;' if bold else ''}")
+        breakdown_grid.addWidget(label, row, col)
+        return label
+
+    def refresh_breakdown() -> None:
+        clear_grid(breakdown_grid)
+        for col, text in enumerate(["ITEM", "QUANTITY", "POWER GAINED", "POWER USED", "WATER GAINED / DAY"]):
+            head = QLabel(text)
+            head.setObjectName("BuildBreakHead")
+            head.setAlignment(Qt.AlignLeft if col == 0 else Qt.AlignCenter)
+            breakdown_grid.addWidget(head, 0, col)
+        selected = [row for row in rows if quantities.get(int(row["id"]), 0) > 0]
+        if not selected:
+            empty = QLabel("No placeable items selected yet.")
+            empty.setObjectName("BuildMuted")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setMinimumHeight(170)
+            breakdown_grid.addWidget(empty, 1, 0, 1, 5)
             return
-        labels = [f"{row['name']}" for row in sets]
-        choice, ok = QInputDialog.getItem(page, "Load Crafting Set", "Choose a saved set:", labels, 0, False)
-        if not ok:
-            return
-        selected = sets[labels.index(choice)]
-        targets.clear()
-        targets.extend(store.load_crafting_set(int(selected["id"])))
-        refresh_calculator()
-        window.notify("Crafting Set Loaded", selected["name"], "success")
+        table_row = 1
+        for item in selected:
+            item_id = int(item["id"])
+            qty = quantities[item_id]
+            item_cell = QHBoxLayout()
+            item_cell.setContentsMargins(0, 4, 0, 4)
+            item_cell.setSpacing(8)
+            name = QLabel(item["name"])
+            name.setObjectName("BuildTableCell")
+            item_cell.addWidget(name, 1)
+            breakdown_grid.addLayout(item_cell, table_row, 0)
+            gained = qty * row_float(item, "power_generated")
+            used = qty * row_float(item, "power_cost")
+            water = qty * row_float(item, "water_gained_per_day")
+            add_breakdown_text(str(qty), table_row, 1)
+            add_breakdown_text(number_text(gained, plus=True, dash_zero=True), table_row, 2, green if gained else "#DCD2EF", bool(gained))
+            add_breakdown_text(number_text(used, dash_zero=True, negative=True), table_row, 3, red if used else "#DCD2EF", bool(used))
+            add_breakdown_text(number_text(water, plus=True, dash_zero=True), table_row, 4, blue if water else "#DCD2EF", bool(water))
+            table_row += 1
+        generated, used, _net, water = totals()
+        spacer = QFrame()
+        spacer.setFixedHeight(8)
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        breakdown_grid.addWidget(spacer, table_row, 0, 1, 5)
+        table_row += 1
+        total_label = QLabel("TOTALS")
+        total_label.setObjectName("BuildTotalLabel")
+        breakdown_grid.addWidget(total_label, table_row, 0)
+        add_breakdown_text("", table_row, 1)
+        add_breakdown_text(number_text(generated, plus=True), table_row, 2, green, True)
+        add_breakdown_text(number_text(used, negative=True), table_row, 3, red, True)
+        add_breakdown_text(number_text(water, plus=True), table_row, 4, blue, True)
+        breakdown_grid.setColumnStretch(0, 3)
+        for col in range(1, 5):
+            breakdown_grid.setColumnStretch(col, 2)
 
-    def clear_targets():
-        targets.clear()
-        refresh_calculator()
+    def refresh_totals() -> None:
+        generated, used, net, water = totals()
+        stat_values["generated"].setText(number_text(generated, plus=True))
+        stat_values["used"].setText(number_text(used, negative=True))
+        stat_values["net"].setText(number_text(net, plus=True))
+        stat_values["water"].setText(number_text(water, plus=True))
+        set_label_color(stat_values["generated"], green)
+        set_label_color(stat_values["used"], red)
+        set_label_color(stat_values["net"], purple)
+        set_label_color(stat_values["water"], blue)
+        if net > 0:
+            net_badge.setText("SURPLUS")
+            net_badge.setStyleSheet("background: rgba(57,170,78,0.34); color: #75F58B; border-radius: 5px; padding: 5px 8px; font-weight: 900;")
+            status_message.setText("Your base is generating more power than it uses.")
+            status_value.setText(f"Power Surplus: {number_text(net, plus=True)}")
+        elif net < 0:
+            net_badge.setText("DEFICIT")
+            net_badge.setStyleSheet("background: rgba(255,62,72,0.24); color: #FF6268; border-radius: 5px; padding: 5px 8px; font-weight: 900;")
+            status_message.setText("Your base requires more power than it generates.")
+            status_value.setText(f"Additional Power Needed: {number_text(abs(net))}")
+        else:
+            net_badge.setText("SURPLUS")
+            net_badge.setStyleSheet("background: rgba(57,170,78,0.34); color: #75F58B; border-radius: 5px; padding: 5px 8px; font-weight: 900;")
+            status_message.setText("Your base power generation and usage are balanced.")
+            status_value.setText("Power Balance: 0")
+        refresh_breakdown()
 
-    def set_import_busy(is_busy: bool, status: str = ""):
-        import_progress.setVisible(is_busy)
-        import_status.setText(status or ("Importing recipe..." if is_busy else "Ready"))
-        import_url_btn.setEnabled(not is_busy)
-        add_btn.setEnabled(not is_busy)
+    def change_quantity(item_id: int, delta: int) -> None:
+        quantities[item_id] = max(0, quantities.get(item_id, 0) + delta)
+        label = qty_labels.get(item_id)
+        if label is not None:
+            label.setText(str(quantities[item_id]))
+        refresh_totals()
 
-    def import_recipe_url():
-        url, ok = QInputDialog.getText(page, "Import Recipe URL", "Paste an Awakening Wiki, Questlog, gaming.tools, or item recipe page URL:")
-        if not ok or not url.strip():
-            return
-        set_import_busy(True, "Importing selected recipe page...")
-        worker = CompanionImportWorker("recipe_url", url=url.strip(), max_pages=1, parent=page)
-        page._recipe_import_worker = worker
-        worker.progress.connect(import_status.setText)
-        def done(stats):
-            set_import_busy(False, f"Done. Imported {stats.get('recipes', 0)} recipe(s).")
-            reload_recipe_choices()
-            refresh_calculator()
-            window.notify("Recipe Imported", f"Imported {stats.get('recipes', 0)} recipe(s).", "success")
-        def fail(message):
-            set_import_busy(False, "Recipe import failed")
-            QMessageBox.warning(page, "Recipe Import Failed", f"Could not import recipe:\n{message}")
-        worker.finished_ok.connect(done)
-        worker.failed.connect(fail)
-        worker.start()
+    def clear_all() -> None:
+        for item_id in list(quantities):
+            quantities[item_id] = 0
+            label = qty_labels.get(item_id)
+            if label is not None:
+                label.setText("0")
+        refresh_totals()
 
-    search.textChanged.connect(reload_recipe_choices)
-    search_results.itemDoubleClicked.connect(lambda item: add_selected_recipe())
-    add_btn.clicked.connect(add_selected_recipe)
-    copy_btn.clicked.connect(copy_discord)
-    material_btn.clicked.connect(show_material_list)
-    save_set_btn.clicked.connect(save_set)
-    load_set_btn.clicked.connect(load_set)
-    clear_btn.clicked.connect(clear_targets)
-    import_url_btn.clicked.connect(import_recipe_url)
+    def clear_item_list() -> None:
+        while item_list.count():
+            item = item_list.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget:
+                widget.deleteLater()
+            elif child_layout:
+                clear_grid(child_layout)
 
-    reload_recipe_choices()
-    refresh_calculator()
+    def add_group_header(text: str) -> None:
+        header = QLabel(text)
+        header.setObjectName("BuildGroupHeader")
+        item_list.addWidget(header)
+
+    def add_item_row(row) -> None:
+        item_id = int(row["id"])
+        item_row = QFrame()
+        item_row.setObjectName("BuildItemRow")
+        item_row.setMinimumHeight(64)
+        row_layout = QHBoxLayout(item_row)
+        row_layout.setContentsMargins(10, 8, 10, 8)
+        row_layout.setSpacing(12)
+        copy = QVBoxLayout()
+        copy.setSpacing(3)
+        name = QLabel(row["name"])
+        name.setObjectName("BuildItemName")
+        name.setWordWrap(True)
+        subtype = QLabel(row["subcategory"] or row["category"] or "Placeable")
+        subtype.setObjectName("BuildItemType")
+        copy.addWidget(name)
+        copy.addWidget(subtype)
+        row_layout.addLayout(copy, 1)
+        minus = QPushButton("-")
+        minus.setObjectName("BuildQtyButton")
+        minus.setFixedSize(34, 34)
+        value = QLabel("0")
+        value.setObjectName("BuildQtyValue")
+        value.setFixedSize(50, 34)
+        plus = QPushButton("+")
+        plus.setObjectName("BuildQtyButton")
+        plus.setFixedSize(34, 34)
+        qty_labels[item_id] = value
+        minus.clicked.connect(lambda checked=False, ident=item_id: change_quantity(ident, -1))
+        plus.clicked.connect(lambda checked=False, ident=item_id: change_quantity(ident, 1))
+        row_layout.addWidget(minus)
+        row_layout.addWidget(value)
+        row_layout.addWidget(plus)
+        item_list.addWidget(item_row)
+
+    def render_item_list() -> None:
+        nonlocal rows
+        rows = list(store.build_calculator_items())
+        quantities.clear()
+        quantities.update({int(row["id"]): 0 for row in rows})
+        qty_labels.clear()
+        count_badge.setText(f"{len(rows):,}")
+        clear_item_list()
+        if rows:
+            groups = [
+                ("POWER GAIN", [row for row in rows if row_float(row, "power_generated") > 0 or row_float(row, "water_gained_per_day") > 0]),
+                ("POWER LOSS", [row for row in rows if row_float(row, "power_generated") <= 0 and row_float(row, "water_gained_per_day") <= 0 and row_float(row, "power_cost") > 0]),
+            ]
+            for title, group_rows in groups:
+                if not group_rows:
+                    continue
+                add_group_header(title)
+                for row in group_rows:
+                    add_item_row(row)
+            item_list.addStretch(1)
+        else:
+            empty = QLabel("No power or water placeables were found.")
+            empty.setObjectName("BuildMuted")
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setMinimumHeight(220)
+            item_list.addWidget(empty)
+            item_list.addStretch(1)
+
+    render_item_list()
+
+    clear_btn.clicked.connect(clear_all)
+
+    tip = QFrame()
+    tip.setObjectName("BuildTipBar")
+    tip_layout = QHBoxLayout(tip)
+    tip_layout.setContentsMargins(18, 12, 18, 12)
+    tip_layout.setSpacing(10)
+    tip_icon = QLabel("*")
+    tip_icon.setStyleSheet("color: #FFD173; font-size: 14px;")
+    tip_text = QLabel("Tip: Only placeable items are shown. All values are totals and include any applicable modifiers.")
+    tip_text.setObjectName("BuildSubtitle")
+    tip_text.setWordWrap(True)
+    tip_layout.addWidget(tip_icon)
+    tip_layout.addWidget(tip_text, 1)
+    outer_layout.addWidget(tip)
+
+    def refresh_companion_craft() -> None:
+        render_item_list()
+        refresh_totals()
+
+    page.refresh_companion_craft = refresh_companion_craft
+    refresh_totals()
     return page
-
 
 class BlueprintGrid(QWidget):
     def __init__(self):
@@ -811,7 +999,7 @@ def build_blueprints_page(window) -> QWidget:
         QMessageBox.information(page, "Blueprint Details", "\n".join(lines))
 
     def make_blueprint_card(row):
-        body = f"{row['base_type'] or '-'}  •  Players: {row['players_recommended'] or '-'}\nTags: {row['tags'] or '-'}\n{row['material_notes'] or ''}\nDouble-click for details."
+        body = f"{row['base_type'] or '-'}  -  Players: {row['players_recommended'] or '-'}\nTags: {row['tags'] or '-'}\n{row['material_notes'] or ''}\nDouble-click for details."
         card = _card(row["name"], body, 135)
         card.setToolTip("Double-click to view blueprint details")
         card.mouseDoubleClickEvent = lambda event, r=row: open_blueprint(r)
@@ -1276,3 +1464,5 @@ def build_game_manager_page(window) -> QWidget:
     apply_tweaks_btn.clicked.connect(apply_selected_tweaks)
     remove_tweaks_btn.clicked.connect(remove_stankytools_tweaks)
     return page
+
+

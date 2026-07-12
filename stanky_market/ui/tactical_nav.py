@@ -265,7 +265,7 @@ class TacticalSidebar(QFrame):
             layout.addWidget(item)
 
         layout.addStretch()
-        self.status = QLabel("â—")
+        self.status = QLabel("o")
         self.status.setAlignment(Qt.AlignCenter)
         self.status.setStyleSheet("color:#59D37A; font-size:18px; background:transparent;")
         layout.addWidget(self.status)

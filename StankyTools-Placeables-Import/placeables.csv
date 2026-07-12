@@ -1,0 +1,43 @@
+name,category,subcategory,item_type,image_filename
+Vehicles Fabricator,Utility,Fabricators,Placeable,Vehicles_Fabricator.png
+Water Cistern,Utility,Storage,Placeable,Water_Cistern.png
+Weapons Fabricator,Utility,Fabricators,Placeable,Weapons_Fabricator.png
+Wind Turbine Directional,Utility,Utilities,Placeable,Wind_Turbine_Directional.png
+Wind Turbine Omnidirectional,Utility,Utilities,Placeable,Wind_Turbine_Omnidirectional.png
+Windtrap,Utility,Utilities,Placeable,Windtrap.png
+Medium Chemical Refinery,Utility,Refineries,Placeable,Medium_Chemical_Refinery.png
+Medium Ore Refinery,Utility,Refineries,Placeable,Medium_Ore_Refinery.png
+Medium Spice Refinery,Utility,Refineries,Placeable,Medium_Spice_Refinery.png
+Medium Storage Container,Utility,Storage,Placeable,Medium_Storage_Container.png
+Medium Water Cistern,Utility,Storage,Placeable,Medium_Water_Cistern.png
+Pentashield Surface Horizontal,Utility,Utilities,Placeable,Pentashield_Surface_Horizontal.png
+Pentashield Surface Vertical,Utility,Utilities,Placeable,Pentashield_Surface_Vertical.png
+Personal Fabricator,Utility,Fabricators,Placeable,Personal_Fabricator.png
+Recycler,Utility,Utilities,Placeable,Recycler.png
+Repair Station,Utility,Utilities,Placeable,Repair_Station.png
+Small Chemical Refinery,Utility,Refineries,Placeable,Small_Chemical_Refinery.png
+Small Ore Refinery,Utility,Refineries,Placeable,Small_Ore_Refinery.png
+Small Storage Container,Utility,Storage,Placeable,Small_Storage_Container.png
+Spice Refinery,Utility,Refineries,Placeable,Spice_Refinery.png
+Spice-Powered Generator,Utility,Utilities,Placeable,Spice_Powered_Generator.png
+Storage Container,Utility,Storage,Placeable,Storage_Container.png
+Sub-Fief Console,Utility,Utilities,Placeable,Sub_Fief_Console.png
+Survival Fabricator,Utility,Fabricators,Placeable,Survival_Fabricator.png
+Advanced Fremen Deathstill,Utility,Refineries,Placeable,Advanced_Fremen_Deathstill.png
+Advanced Garment Fabricator,Utility,Fabricators,Placeable,Advanced_Garment_Fabricator.png
+Advanced Sub-Fief Console,Utility,Utilities,Placeable,Advanced_Sub_Fief_Console.png
+Advanced Survival Fabricator,Utility,Fabricators,Placeable,Advanced_Survival_Fabricator.png
+Advanced Vehicle Fabricator,Utility,Fabricators,Placeable,Advanced_Vehicle_Fabricator.png
+Advanced Weapons Fabricator,Utility,Fabricators,Placeable,Advanced_Weapons_Fabricator.png
+Augmentation Station,Utility,Utilities,Placeable,Augmentation_Station.png
+Blood Purifier,Utility,Refineries,Placeable,Blood_Purifier.png
+Chest,Utility,Storage,Placeable,Chest.png
+Fabricator,Utility,Fabricators,Placeable,Fabricator.png
+Fremen Deathstill,Utility,Refineries,Placeable,Fremen_Deathstill.png
+Fuel-Powered Generator,Utility,Utilities,Placeable,Fuel_Powered_Generator.png
+Garment Fabricator,Utility,Fabricators,Placeable,Garment_Fabricator.png
+Improved Blood Purifier,Utility,Refineries,Placeable,Improved_Blood_Purifier.png
+Large Ore Refinery,Utility,Refineries,Placeable,Large_Ore_Refinery.png
+Large Spice Refinery,Utility,Refineries,Placeable,Large_Spice_Refinery.png
+Large Water Cistern,Utility,Storage,Placeable,Large_Water_Cistern.png
+Large Windtrap,Utility,Utilities,Placeable,Large_Windtrap.png
